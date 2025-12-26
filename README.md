@@ -142,9 +142,6 @@ See [requirements.txt](requirements.txt) for full list.
 
 ## 🖼️ Screenshots
 
-```markdown
-## Screenshots
-
 ### Ruler Mode
 ![Ruler Mode](screenshots/ruler-mode.png)
 
@@ -153,7 +150,7 @@ See [requirements.txt](requirements.txt) for full list.
 
 ### Settings Panel
 ![Settings](screenshots/settings-panel.png)
-```
+
 
 ## 🤝 Contributing
 
@@ -217,5 +214,6 @@ Yonsei University College of Dentistry
 ⭐ If you find this project useful, please consider giving it a star!
 
 📢 For bug reports and feature requests, please use the [Issues](https://github.com/dinuka0001/ScreenRuler-Pro/issues) page.
+
 
 
