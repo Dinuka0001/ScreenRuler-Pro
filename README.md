@@ -7,7 +7,6 @@
 
 A professional on-screen measurement tool for Windows with advanced features including multiple measurement modes, customizable themes, and system tray integration.
 
-![ScreenRuler Pro](https://via.placeholder.com/800x400/5294e2/ffffff?text=ScreenRuler+Pro)
 
 ## ✨ Features
 
@@ -207,3 +206,4 @@ Yonsei University College of Dentistry
 ⭐ If you find this project useful, please consider giving it a star!
 
 📢 For bug reports and feature requests, please use the [Issues](https://github.com/dinuka0001/ScreenRuler-Pro/issues) page.
+
