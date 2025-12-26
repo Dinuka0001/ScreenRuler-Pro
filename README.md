@@ -1,4 +1,4 @@
-# 📏 ScreenRuler Pro
+# 📏 ScreenRuler Pro V1.0.0
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-green.svg)
@@ -39,14 +39,14 @@ A professional on-screen measurement tool for Windows with advanced features inc
 ## 🚀 Quick Start
 
 ### Pre-built Executable (Recommended)
-1. Download the latest release from the [Releases](https://github.com/yourusername/ScreenRuler-Pro/releases) page
+1. Download the latest release from the [Releases](https://github.com/dinuka0001/ScreenRuler-Pro/releases) page
 2. Run `ScreenRuler_Pro_v1.0.0.exe`
 3. No installation or Python required!
 
 ### Run from Source
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/ScreenRuler-Pro.git
+git clone https://github.com/dinuka0001/ScreenRuler-Pro.git
 cd ScreenRuler-Pro
 
 # Create virtual environment (optional but recommended)
@@ -206,4 +206,4 @@ Yonsei University College of Dentistry
 
 ⭐ If you find this project useful, please consider giving it a star!
 
-📢 For bug reports and feature requests, please use the [Issues](https://github.com/yourusername/ScreenRuler-Pro/issues) page.
+📢 For bug reports and feature requests, please use the [Issues](https://github.com/dinuka0001/ScreenRuler-Pro/issues) page.
