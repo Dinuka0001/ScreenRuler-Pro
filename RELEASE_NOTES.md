@@ -17,14 +17,14 @@
 
 4. Create a release on GitHub:
    - Go to Releases → Draft a new release
-   - Tag: `v1.0.0`
-   - Title: `ScreenRuler Pro v1.0.0`
-   - Attach: `ScreenRuler_Pro_v1.0.0.exe` from dist folder
+   - Tag: `v2.0.0`
+   - Title: `ScreenRuler Pro v2.0.0`
+   - Attach: `ScreenRuler_Pro_v2.0.0.exe` from dist folder
    - Include: `README.txt` (user guide)
    - Copy changelog from `CHANGELOG.md`
 
 5. Recommended release assets:
-   - `ScreenRuler_Pro_v1.0.0.exe` (main executable)
+   - `ScreenRuler_Pro_v2.0.0.exe` (main executable)
    - `README.txt` (usage instructions for end users)
    - Source code (automatically included by GitHub)
 

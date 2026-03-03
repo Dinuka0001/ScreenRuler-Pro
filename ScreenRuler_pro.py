@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+ScreenRuler Pro - Advanced on-screen measurement tool with text annotation support
+Version 2.0.0
+"""
+
 import tkinter as tk
 from tkinter import ttk, colorchooser, messagebox
 import math
@@ -6,7 +12,7 @@ import json
 import os
 import sys
 from datetime import datetime
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 import pystray
 from threading import Thread
 
@@ -61,7 +67,8 @@ class ProRuler:
             "show_labels": True,  # Show/hide ruler labels
             "mode": "ruler",  # ruler, fractions, angle, polygon
             "polygon_sides": 4,  # Number of sides for polygon mode
-            "toolbar_visible": True  # Show/hide toolbar
+            "toolbar_visible": True,  # Show/hide toolbar
+            "endpoint_style": "circle"  # none, circle, square, crosslines, arrow
         }
         
         # Themes
@@ -69,7 +76,9 @@ class ProRuler:
             "cyan": {"active": "#00FFFF", "pass": "#FF5555"},
             "green": {"active": "#00FF00", "pass": "#FF8800"},
             "purple": {"active": "#AA00FF", "pass": "#FFAA00"},
-            "orange": {"active": "#FF8800", "pass": "#00FFFF"}
+            "orange": {"active": "#FF8800", "pass": "#00FFFF"},
+            "black": {"active": "#0A0A0A", "pass": "#666666"},
+            "white": {"active": "#F5F5F5", "pass": "#CCCCCC"}
         }
         
         # Load saved config
@@ -106,6 +115,7 @@ class ProRuler:
         self.p2 = {"x": center_x + 350, "y": center_y}
         self.dragging = None
         self.minimized = False
+        self.toolbar_minimized = False  # Track toolbar minimize state separately
         self.is_passthrough = False  # Start in Edit mode by default
         self.show_help = False
         self.show_settings = False
@@ -125,6 +135,22 @@ class ProRuler:
         self.angle_arm2 = {"x": center_x, "y": center_y - 200}  # Second arm endpoint
         self.angle_length = 200  # Length of each arm
         
+        # Text mode state
+        self.text_objects = []  # List of text objects: {"x": x, "y": y, "text": str, "width": w, "height": h, ...}
+        self.text_mode_active = False
+        self.text_visible = True  # Show/hide all text objects
+        self.text_dragging_index = None
+        self.text_resizing_index = None
+        self.text_resize_handle = None  # Which corner: 'nw', 'ne', 'sw', 'se'
+        self.selected_text_index = None  # Track selected text object for deletion
+        self.text_input_var = tk.StringVar(value="Your text here")
+        self.text_font_family = "Arial"
+        self.text_font_size = 24
+        self.text_bold = False
+        self.text_italic = False
+        self.text_underline = False
+        self.text_outline = False
+        
         # Toolbar state
         self.toolbar = None
         self.toolbar_frame = None
@@ -134,6 +160,19 @@ class ProRuler:
         self.mode_buttons = {}
         self.menu_buttons = {}
         self.lock_status_var = tk.StringVar(value="None")
+        
+        # Visibility state for each mode
+        self.mode_visible = {
+            "ruler": True,
+            "fractions": True,
+            "angle": True,
+            "polygon": True
+        }
+        
+        # Initialize control variables
+        self.unit_var = tk.StringVar(value=self.config["unit"])
+        self.theme_var = tk.StringVar(value=self.config.get("theme", "cyan"))
+        self.lock_label = None  # Will be set if created in UI
         
         # Setup Window geometry (cover the whole virtual desktop)
         self.root.geometry(f"{self.virtual_w}x{self.virtual_h}+{self.virtual_x}+{self.virtual_y}")
@@ -195,6 +234,12 @@ class ProRuler:
         self.root.bind("<V>", self.toggle_labels)
         self.root.bind("<m>", self.cycle_mode)
         self.root.bind("<M>", self.cycle_mode)
+        self.root.bind("<e>", self.cycle_endpoint_style)
+        self.root.bind("<E>", self.cycle_endpoint_style)
+        self.root.bind("<Delete>", self.delete_text_object)
+        self.root.bind("<BackSpace>", self.delete_text_object)
+        self.root.bind("<b>", self.minimize_toolbar_only)
+        self.root.bind("<B>", self.minimize_toolbar_only)
         
         # Start in Edit mode by default (click-through disabled)
         hwnd = self.root.winfo_id()
@@ -253,83 +298,38 @@ class ProRuler:
         widget.bind('<Leave>', on_leave)
     
     def create_toolbar(self):
-        """Create toolbar UI similar to the reference mock."""
+        """Create toolbar UI with standard Windows title bar."""
         # Create a top-level window for toolbar
         self.toolbar = tk.Toplevel(self.root)
-        self.toolbar.overrideredirect(True)
+        self.toolbar.title("ScreenRuler Pro")
         self.toolbar.attributes('-topmost', True)
         self.toolbar.attributes('-alpha', 0.95)
         
+        # Close entire app when toolbar is closed
+        self.toolbar.protocol("WM_DELETE_WINDOW", self.close_app)
+        
         # Position at top center of the virtual desktop (multi-monitor)
         # Compact toolbar size for better screen real estate
-        toolbar_width = min(450, max(420, self.virtual_w - 100))
-        toolbar_height = 155
+        toolbar_width = min(490, max(490, self.virtual_w - 100))
+        toolbar_height = 128  # Reduced height since no custom title bar
         toolbar_x = int(self.virtual_x + (self.virtual_w - toolbar_width) // 2)
         toolbar_y = int(self.virtual_y + 20)
         self.toolbar.geometry(f"{toolbar_width}x{toolbar_height}+{toolbar_x}+{toolbar_y}")
 
-        # Allow resizing via custom grip (overrideredirect removes native handles)
-        self.toolbar.minsize(420, 140)
+        # Set window icon if available
+        try:
+            icon_path = os.path.join(os.path.dirname(__file__), 'Icon.ico')
+            if os.path.exists(icon_path):
+                self.toolbar.iconbitmap(icon_path)
+        except Exception:
+            pass
+
+        # Allow resizing
+        self.toolbar.minsize(420, 110)
         
-        # Main frame
+        # Main frame (no custom title bar needed)
         self.toolbar_frame = tk.Frame(self.toolbar, bg='#f5f6f7', relief=tk.RAISED, bd=2)
         self.toolbar_frame.pack(fill='both', expand=True)
-        
-        # ===== TITLE BAR =====
-        title_bar = tk.Frame(self.toolbar_frame, bg='#5294e2', height=30)
-        title_bar.pack(fill='x')
-        title_bar.pack_propagate(False)
-        
-        # Make title bar draggable
-        title_bar.bind('<Button-1>', self.start_move_toolbar)
-        title_bar.bind('<B1-Motion>', self.do_move_toolbar)
-        
-        # Title text (centered)
-        title_label = tk.Label(
-            title_bar,
-            text="ScreenRuler Pro",
-            font=('Segoe UI', 10, 'bold'),
-            fg='white',
-            bg='#5294e2',
-        )
-        title_label.place(relx=0.5, rely=0.5, anchor='center')
-        title_label.bind('<Button-1>', self.start_move_toolbar)
-        title_label.bind('<B1-Motion>', self.do_move_toolbar)
-        
-        # Close and minimize buttons (right side) - Compact size
-        close_btn = tk.Button(
-            title_bar,
-            text="✕",
-            font=('Segoe UI', 9, 'bold'),
-            bg='#f46067',
-            fg='white',
-            command=self.close_app,
-            width=2,
-            relief=tk.FLAT,
-            cursor='hand2',
-            bd=0,
-            activebackground='#f13039',
-        )
-        close_btn.pack(side='right', padx=2, pady=2)
-        close_btn.bind("<Enter>", lambda e: e.widget.config(bg='#f13039'))
-        close_btn.bind("<Leave>", lambda e: e.widget.config(bg='#f46067'))
-
-        min_btn = tk.Button(
-            title_bar,
-            text="─",
-            font=('Segoe UI', 9, 'bold'),
-            bg='#5294e2',
-            fg='white',
-            command=self.toggle_minimize,
-            width=2,
-            relief=tk.FLAT,
-            cursor='hand2',
-            bd=0,
-            activebackground='#4a85d4',
-        )
-        min_btn.pack(side='right', padx=2, pady=2)
-        min_btn.bind("<Enter>", lambda e: e.widget.config(bg='#4a85d4'))
-        min_btn.bind("<Leave>", lambda e: e.widget.config(bg='#5294e2'))
         
         # ===== MENU BAR =====
         menubar_frame = tk.Frame(self.toolbar_frame, bg='#e7e8eb', height=28)
@@ -375,28 +375,35 @@ class ProRuler:
             return btn
 
         # Mode buttons (square)
-        self.mode_buttons["ruler"] = tool_btn("📏", lambda: self.set_mode_from_toolbar("ruler"))
-        self.create_tooltip(self.mode_buttons["ruler"], "Ruler Mode (M)")
+        self.mode_buttons["ruler"] = tool_btn("📏", lambda: self.toggle_mode_visibility("ruler"))
+        self.create_tooltip(self.mode_buttons["ruler"], "Ruler Mode (M) - Click to toggle visibility")
         
-        self.mode_buttons["fractions"] = tool_btn("¼", lambda: self.set_mode_from_toolbar("fractions"))
-        self.create_tooltip(self.mode_buttons["fractions"], "Fractions Mode (M)")
+        self.mode_buttons["fractions"] = tool_btn("¼", lambda: self.toggle_mode_visibility("fractions"))
+        self.create_tooltip(self.mode_buttons["fractions"], "Fractions Mode (M) - Click to toggle visibility")
         
-        self.mode_buttons["angle"] = tool_btn("∠", lambda: self.set_mode_from_toolbar("angle"))
-        self.create_tooltip(self.mode_buttons["angle"], "Angle Mode (M)")
+        self.mode_buttons["angle"] = tool_btn("∠", lambda: self.toggle_mode_visibility("angle"))
+        self.create_tooltip(self.mode_buttons["angle"], "Angle Mode (M) - Click to toggle visibility")
         
-        self.mode_buttons["polygon"] = tool_btn("⬟", lambda: self.set_mode_from_toolbar("polygon"))
-        self.create_tooltip(self.mode_buttons["polygon"], "Polygon Mode (M)")
+        self.mode_buttons["polygon"] = tool_btn("⬟", lambda: self.toggle_mode_visibility("polygon"))
+        self.create_tooltip(self.mode_buttons["polygon"], "Polygon Mode (M) - Click to toggle visibility")
+        
+        self.mode_buttons["text"] = tool_btn("A", lambda: self.toggle_text_mode())
+        self.create_tooltip(self.mode_buttons["text"], "Text Mode - Add onscreen text")
 
         # Numeric box (fractions/polygon sides) styled like a tool tile
         number_tile = tk.Frame(icon_row, bg='#d3dae3', bd=1, relief=tk.RAISED, width=70, height=38)
         number_tile.pack(side='left', padx=2, pady=2)
         number_tile.pack_propagate(False)
+        
+        # Inner frame with white background to match other buttons
+        number_inner = tk.Frame(number_tile, bg='#fbfbfc')
+        number_inner.pack(fill='both', expand=True)
 
-        self.number_label = tk.Label(number_tile, text="", font=('Segoe UI', 7, 'bold'), bg='#fbfbfc', fg='#5c616c')
+        self.number_label = tk.Label(number_inner, text="", font=('Segoe UI', 7, 'bold'), bg='#fbfbfc', fg='#5c616c')
         self.number_label.pack(anchor='w', padx=4, pady=(2, 0))
 
         self.number_input = tk.Spinbox(
-            number_tile,
+            number_inner,
             from_=2,
             to=50,
             width=5,
@@ -405,7 +412,7 @@ class ProRuler:
             command=self.update_number_input,
         )
         self.number_input.pack(expand=True, fill='both')
-        self.number_input.config(bg='#fbfbfc', fg='#5c616c', buttonbackground='#d3dae3', insertbackground='#5c616c', relief=tk.FLAT)
+        self.number_input.config(bg='#fbfbfc', fg='#5c616c', buttonbackground='#fbfbfc', insertbackground='#5c616c', relief=tk.FLAT)
         self.number_input.bind('<Return>', lambda e: self.update_number_input())
         self.number_input.bind('<FocusOut>', lambda e: self.update_number_input())
 
@@ -418,10 +425,14 @@ class ProRuler:
         unit_tile.pack(side='left', padx=2, pady=2)
         unit_tile.pack_propagate(False)
         
-        tk.Label(unit_tile, text="Unit", font=('Segoe UI', 7, 'bold'), bg='#fbfbfc', fg='#5c616c').pack(anchor='w', padx=4, pady=(2, 0))
+        # Inner frame with white background to match other buttons
+        unit_inner = tk.Frame(unit_tile, bg='#fbfbfc')
+        unit_inner.pack(fill='both', expand=True)
+        
+        tk.Label(unit_inner, text="Unit", font=('Segoe UI', 7, 'bold'), bg='#fbfbfc', fg='#5c616c').pack(anchor='w', padx=4, pady=(2, 0))
         
         self.unit_dropdown = ttk.Combobox(
-            unit_tile,
+            unit_inner,
             values=['px', 'um', 'mm', 'cm', 'm', 'in'],
             width=4,
             font=('Segoe UI', 9, 'bold'),
@@ -440,6 +451,140 @@ class ProRuler:
         # Settings
         settings_btn = tool_btn("⚙", self.toggle_settings)
         self.create_tooltip(settings_btn, "Open Settings (S)")
+        
+        # ===== TEXT INPUT AND FORMATTING TOOLBAR (shown when text mode active) =====
+        self.text_toolbar_frame = tk.Frame(body_frame, bg='#f5f6f7')
+        # Initially hidden, will be packed when text mode is activated
+        
+        # Text input field
+        text_input_frame = tk.Frame(self.text_toolbar_frame, bg='#d3dae3', bd=1, relief=tk.RAISED)
+        text_input_frame.pack(fill='x', padx=2, pady=(4, 2))
+        
+        tk.Label(text_input_frame, text="Text:", font=('Segoe UI', 8, 'bold'), bg='#fbfbfc', fg='#5c616c').pack(side='left', padx=(4, 2))
+        
+        self.text_input_entry = tk.Entry(
+            text_input_frame,
+            textvariable=self.text_input_var,
+            font=('Segoe UI', 10),
+            bg='#fbfbfc',
+            fg='#5c616c',
+            relief=tk.FLAT,
+            insertbackground='#5c616c'
+        )
+        self.text_input_entry.pack(side='left', fill='x', expand=True, padx=4, pady=4)
+        self.text_input_entry.bind('<Return>', lambda e: self.add_text_object())
+        
+        add_text_btn = tk.Button(
+            text_input_frame,
+            text="Add",
+            command=self.add_text_object,
+            font=('Segoe UI', 9, 'bold'),
+            bg='#5294e2',
+            fg='white',
+            relief=tk.FLAT,
+            cursor='hand2',
+            padx=8,
+            bd=0
+        )
+        add_text_btn.pack(side='right', padx=4, pady=4)
+        
+        # Text formatting icons row
+        text_format_row = tk.Frame(self.text_toolbar_frame, bg='#f5f6f7')
+        text_format_row.pack(fill='x', pady=(0, 2))
+        
+        def text_tool_btn(text, command, tooltip_text):
+            tile = tk.Frame(text_format_row, bg='#d3dae3', bd=1, relief=tk.RAISED, width=35, height=35)
+            tile.pack(side='left', padx=2, pady=2)
+            tile.pack_propagate(False)
+            
+            btn = tk.Button(
+                tile,
+                text=text,
+                command=command,
+                font=('Segoe UI', 10, 'bold') if len(text) <= 2 else ('Segoe UI', 9, 'bold'),
+                bg='#fbfbfc',
+                fg='#5c616c',
+                activebackground='#d3dae3',
+                relief=tk.FLAT,
+                bd=0,
+                cursor='hand2',
+                highlightthickness=0,
+            )
+            btn.pack(fill='both', expand=True)
+            self.create_tooltip(btn, tooltip_text)
+            return btn
+        
+        # Font size controls
+        tk.Label(text_format_row, text="Size:", font=('Segoe UI', 8, 'bold'), bg='#f5f6f7', fg='#5c616c').pack(side='left', padx=(4, 2))
+        
+        self.font_size_spinbox = tk.Spinbox(
+            text_format_row,
+            from_=8,
+            to=200,
+            width=4,
+            font=('Segoe UI', 9),
+            command=self.update_text_font_size,
+            bg='#fbfbfc',
+            fg='#5c616c',
+            buttonbackground='#fbfbfc',
+            insertbackground='#5c616c',
+            relief=tk.FLAT
+        )
+        self.font_size_spinbox.delete(0, 'end')
+        self.font_size_spinbox.insert(0, str(self.text_font_size))
+        self.font_size_spinbox.pack(side='left', padx=2)
+        self.font_size_spinbox.bind('<Return>', lambda e: self.update_text_font_size())
+        
+        # Font family dropdown
+        tk.Label(text_format_row, text="Font:", font=('Segoe UI', 8, 'bold'), bg='#f5f6f7', fg='#5c616c').pack(side='left', padx=(8, 2))
+        
+        self.font_family_dropdown = ttk.Combobox(
+            text_format_row,
+            values=['Arial', 'Times New Roman', 'Courier New', 'Comic Sans MS', 'Verdana', 'Georgia', 'Tahoma', 'Trebuchet MS', 'Impact', 'Calibri'],
+            width=12,
+            font=('Segoe UI', 9),
+            state='readonly',
+            style="Toolbar.TCombobox",
+        )
+        self.font_family_dropdown.set(self.text_font_family)
+        self.font_family_dropdown.pack(side='left', padx=2)
+        self.font_family_dropdown.bind('<<ComboboxSelected>>', self.update_text_font_family)
+        
+        # Bold, Italic, Underline buttons with styled text
+        def text_style_btn(text, command, tooltip_text, font_style):
+            tile = tk.Frame(text_format_row, bg='#d3dae3', bd=1, relief=tk.RAISED, width=35, height=35)
+            tile.pack(side='left', padx=2, pady=2)
+            tile.pack_propagate(False)
+            
+            btn = tk.Button(
+                tile,
+                text=text,
+                command=command,
+                font=font_style,
+                bg='#fbfbfc',
+                fg='#5c616c',
+                activebackground='#d3dae3',
+                relief=tk.FLAT,
+                bd=0,
+                cursor='hand2',
+                highlightthickness=0,
+            )
+            btn.pack(fill='both', expand=True)
+            self.create_tooltip(btn, tooltip_text)
+            return btn
+        
+        self.bold_btn = text_style_btn("B", self.toggle_bold, "Bold", ('Segoe UI', 10, 'bold'))
+        self.italic_btn = text_style_btn("I", self.toggle_italic, "Italic", ('Segoe UI', 10, 'italic'))
+        self.underline_btn = text_style_btn("U", self.toggle_underline, "Underline", ('Segoe UI', 10, 'underline'))
+        
+        # Outline toggle
+        self.outline_btn = text_tool_btn("□", self.toggle_outline, "Text Box Outline")
+        
+        # Clear text button
+        self.clear_text_btn = text_tool_btn("🗑", self.clear_all_text_objects, "Clear All Text")
+        
+        # Show/Hide text button (eye icon)
+        self.text_visibility_btn = text_tool_btn("👁", self.toggle_text_visibility, "Show/Hide Text")
 
         # ===== MEASUREMENT BANNER =====
         banner = tk.Frame(self.toolbar_frame, bg='#d3dae3', bd=1, relief=tk.SUNKEN)
@@ -454,12 +599,6 @@ class ProRuler:
             anchor='center',
         )
         self.measurement_value_label.pack(fill='both', expand=True, padx=8, pady=4)
-
-        # Resize grip (bottom-right)
-        grip = ttk.Sizegrip(self.toolbar_frame)
-        grip.place(relx=1.0, rely=1.0, anchor='se')
-        grip.bind('<Button-1>', self.start_resize_toolbar)
-        grip.bind('<B1-Motion>', self.do_resize_toolbar)
 
         # Initialize stateful widgets
         self.update_lock_button()
@@ -485,6 +624,8 @@ class ProRuler:
     
     def do_move_toolbar(self, event):
         """Move the toolbar window"""
+        if not self.toolbar or not self.toolbar.winfo_exists():
+            return
         try:
             deltax = event.x - self.toolbar_x
             deltay = event.y - self.toolbar_y
@@ -507,24 +648,6 @@ class ProRuler:
         except Exception as e:
             print(f"Warning: Could not move toolbar: {e}")
 
-    def start_resize_toolbar(self, event):
-        """Start resizing the toolbar from the sizegrip."""
-        self._resize_start_w = self.toolbar.winfo_width()
-        self._resize_start_h = self.toolbar.winfo_height()
-        self._resize_start_x = event.x_root
-        self._resize_start_y = event.y_root
-
-    def do_resize_toolbar(self, event):
-        """Resize toolbar (overrideredirect windows need custom resizing)."""
-        try:
-            dx = event.x_root - self._resize_start_x
-            dy = event.y_root - self._resize_start_y
-            new_w = max(self.toolbar.winfo_minsize()[0], self._resize_start_w + dx)
-            new_h = max(self.toolbar.winfo_minsize()[1], self._resize_start_h + dy)
-            self.toolbar.geometry(f"{int(new_w)}x{int(new_h)}")
-        except Exception:
-            pass
-    
     def create_menu_button(self, parent, text, command):
         """Create a menu bar button"""
         btn = tk.Button(
@@ -551,14 +674,26 @@ class ProRuler:
 
         active = self.config.get("mode", "ruler")
         for mode, btn in self.mode_buttons.items():
+            # Skip text button - it's handled separately
+            if mode == "text":
+                continue
+                
             try:
                 if not btn or not btn.winfo_exists():
                     continue
-                if mode == active:
-                    # Active mode: subtle highlight on Arc palette
+                    
+                # Check if this mode is visible
+                is_visible = self.mode_visible.get(mode, True)
+                is_active = (mode == active)
+                
+                if is_active and is_visible:
+                    # Active and visible: blue highlight
                     btn.config(bg='#5294e2', fg='white', relief=tk.FLAT, bd=0)
+                elif not is_visible:
+                    # Hidden: dimmed gray
+                    btn.config(bg='#d3dae3', fg='#a0a0a0', relief=tk.FLAT, bd=0)
                 else:
-                    # Inactive mode: standard appearance
+                    # Inactive but visible: standard appearance
                     btn.config(bg='#fbfbfc', fg='#5c616c', relief=tk.FLAT, bd=0)
             except tk.TclError:
                 # Widget no longer exists
@@ -605,9 +740,13 @@ class ProRuler:
             if anchor_widget is not None and anchor_widget.winfo_exists():
                 x = anchor_widget.winfo_rootx()
                 y = anchor_widget.winfo_rooty() + anchor_widget.winfo_height()
-            else:
+            elif self.toolbar_frame and self.toolbar_frame.winfo_exists():
                 x = self.toolbar_frame.winfo_rootx() + 10
                 y = self.toolbar_frame.winfo_rooty() + 55
+            else:
+                # Fallback to screen center if toolbar_frame doesn't exist
+                x = self.root.winfo_screenwidth() // 2
+                y = self.root.winfo_screenheight() // 2
             menu.tk_popup(x, y)
         finally:
             try:
@@ -640,11 +779,12 @@ class ProRuler:
         try:
             if hasattr(self, "style") and self.style:
                 if hasattr(self.style, "set_theme"):
-                    self.style.set_theme(theme_name)
+                    # Use getattr to avoid type checker errors with ThemedStyle
+                    getattr(self.style, "set_theme")(theme_name)
                 else:
                     self.style.theme_use(theme_name)
             self._configure_toolbar_styles()
-            if hasattr(self, "theme_var"):
+            if hasattr(self, "theme_var") and self.theme_var:
                 self.theme_var.set(theme_name)
         except Exception as e:
             print(f"Warning: Could not switch theme to {theme_name}: {e}")
@@ -653,10 +793,11 @@ class ProRuler:
             try:
                 if hasattr(self, "style") and self.style:
                     if hasattr(self.style, "set_theme"):
-                        self.style.set_theme(prev_theme)
+                        # Use getattr to avoid type checker errors with ThemedStyle
+                        getattr(self.style, "set_theme")(prev_theme)
                     else:
                         self.style.theme_use(prev_theme)
-                if hasattr(self, "theme_var"):
+                if hasattr(self, "theme_var") and self.theme_var:
                     self.theme_var.set(prev_theme)
             except Exception:
                 pass
@@ -703,6 +844,8 @@ class ProRuler:
         menu = self._make_menu(self.toolbar_frame)
         menu.add_command(label="Copy Measurements (C)", command=self.copy_measurement)
         menu.add_separator()
+        menu.add_command(label="Minimize to Tray", command=self.minimize_to_tray)
+        menu.add_separator()
         menu.add_command(label="Exit (Esc)", command=self.close_app)
 
         anchor = self.menu_buttons.get("File") if getattr(self, 'menu_buttons', None) else None
@@ -745,7 +888,7 @@ class ProRuler:
         theme_menu = self._make_menu(menu)
         theme_menu.add_command(label=f"→ {self.config['theme'].capitalize()}", state=tk.DISABLED)
         theme_menu.add_separator()
-        for theme in ['cyan', 'green', 'purple', 'orange']:
+        for theme in ['cyan', 'green', 'purple', 'orange', 'black', 'white']:
             theme_menu.add_command(label=theme.capitalize(), command=lambda t=theme: self.set_theme(t))
         menu.add_cascade(label="Cycle Themes (T)", menu=theme_menu)
         
@@ -763,11 +906,40 @@ class ProRuler:
         guides_status = "✓" if self.config["show_guides"] else " "
         menu.add_command(label=f"{guides_status} Guide Lines (G)", command=self.toggle_guides)
         
-        fractions_status = "✓" if self.config["show_fractions"] else " "
-        menu.add_command(label=f"{fractions_status} Fractions (F)", command=self.toggle_fractions)
-        
         labels_status = "✓" if self.config["show_labels"] else " "
         menu.add_command(label=f"{labels_status} Ruler Labels (V)", command=self.toggle_labels)
+        
+        menu.add_separator()
+        
+        # Text mode
+        text_mode_status = "✓" if self.text_mode_active else " "
+        menu.add_command(label=f"{text_mode_status} Text Mode", command=self.toggle_text_mode)
+        
+        # Screen Text visibility (always show, regardless of whether text objects exist)
+        screen_text_status = "✓" if self.text_visible else " "
+        menu.add_command(label=f"{screen_text_status} Screen Text", command=self.toggle_text_visibility)
+        
+        # Clear text option (only show if text objects exist)
+        if self.text_objects:
+            menu.add_command(label="Clear All Text", command=self.clear_all_text_objects)
+        
+        menu.add_separator()
+        
+        # Ruler Ends submenu
+        ends_menu = self._make_menu(menu)
+        current_style = self.config.get("endpoint_style", "circle").capitalize()
+        ends_menu.add_command(label=f"→ {current_style}", state=tk.DISABLED)
+        ends_menu.add_separator()
+        endpoint_styles = [
+            ("None", "none"),
+            ("Circle", "circle"),
+            ("Square", "flat"),
+            ("Crosslines", "crosslines"),
+            ("Arrow", "arrow")
+        ]
+        for label, value in endpoint_styles:
+            ends_menu.add_command(label=label, command=lambda v=value: self.set_endpoint_style(v))
+        menu.add_cascade(label="Ruler Ends", menu=ends_menu)
         
         anchor = self.menu_buttons.get("View") if getattr(self, 'menu_buttons', None) else None
         self._popup_menu(menu, anchor)
@@ -792,6 +964,8 @@ class ProRuler:
 
         # Popup at current mouse position
         try:
+            if not self.toolbar or not self.toolbar.winfo_exists():
+                return
             x = self.toolbar.winfo_pointerx()
             y = self.toolbar.winfo_pointery()
             menu.tk_popup(x, y)
@@ -819,7 +993,7 @@ class ProRuler:
         self.draw()
     
     def set_unit(self, unit):
-        """Set measurement unit"""
+        """Set measurement unit and update all related UI elements"""
         normalized = self.normalize_unit(unit)
         self.config["unit"] = normalized
         
@@ -831,9 +1005,18 @@ class ProRuler:
             except tk.TclError:
                 pass
         
-        # Update legacy unit_var if it exists
-        if hasattr(self, 'unit_var'):
+        # Update unit_var
+        if self.unit_var:
             self.unit_var.set(normalized)
+        
+        # Update calibration unit labels if they exist
+        if hasattr(self, 'calibration_unit_labels'):
+            for label in self.calibration_unit_labels:
+                try:
+                    if label.winfo_exists():
+                        label.config(text=normalized)
+                except Exception:
+                    pass
         
         self.save_config()
         self.draw()
@@ -854,8 +1037,16 @@ class ProRuler:
         self.save_config()
         self.draw()
     
+    def set_endpoint_style(self, style):
+        """Set ruler endpoint style"""
+        self.config["endpoint_style"] = style
+        self.save_config()
+        self.draw()
+    
     def on_unit_selected(self, event=None):
         """Handle unit selection from dropdown"""
+        if not self.unit_var:
+            return
         self.config["unit"] = self.normalize_unit(self.unit_var.get())
         self.unit_var.set(self.config["unit"])
         self.save_config()
@@ -949,8 +1140,46 @@ class ProRuler:
         
         return btn
     
+    def toggle_mode_visibility(self, mode):
+        """Toggle visibility of a mode - if already active, hide it; otherwise switch to it"""
+        current_mode = self.config["mode"]
+        
+        # If clicking the currently active mode, toggle its visibility
+        if current_mode == mode:
+            self.mode_visible[mode] = not self.mode_visible[mode]
+            if self.mode_visible[mode]:
+                self.show_notification(f"{mode.capitalize()} shown")
+            else:
+                self.show_notification(f"{mode.capitalize()} hidden")
+        else:
+            # Switching to a different mode - show it and make it active
+            self.mode_visible[mode] = True
+            self.set_mode_from_toolbar(mode)
+            self.show_notification(f"Switched to {mode.capitalize()} mode")
+        
+        self._update_mode_button_highlights()
+        self.draw()
+    
     def set_mode_from_toolbar(self, mode):
         """Set measurement mode from toolbar button"""
+        # Calculate current center position before switching modes
+        if self.config["mode"] == "ruler" or self.config["mode"] == "fractions":
+            # Get center from ruler endpoints
+            center_x = (self.p1["x"] + self.p2["x"]) / 2
+            center_y = (self.p1["y"] + self.p2["y"]) / 2
+        elif self.config["mode"] == "angle":
+            # Get center from angle mode
+            center_x = self.angle_center["x"]
+            center_y = self.angle_center["y"]
+        elif self.config["mode"] == "polygon" and self.polygon_points:
+            # Get center from polygon
+            center_x = sum(p["x"] for p in self.polygon_points) / len(self.polygon_points)
+            center_y = sum(p["y"] for p in self.polygon_points) / len(self.polygon_points)
+        else:
+            # Default to screen center
+            center_x = self.virtual_x + (self.virtual_w / 2)
+            center_y = self.virtual_y + (self.virtual_h / 2)
+        
         self.config["mode"] = mode
         
         # When switching to fractions mode, enable fractions
@@ -962,6 +1191,10 @@ class ProRuler:
                 self.number_input.config(from_=2, to=50)
                 self.number_input.delete(0, 'end')
                 self.number_input.insert(0, str(self.config["fraction_count"]))
+            # Keep ruler at same center position
+            ruler_length = math.sqrt((self.p2["x"] - self.p1["x"])**2 + (self.p2["y"] - self.p1["y"])**2)
+            self.p1 = {"x": center_x - ruler_length/2, "y": center_y}
+            self.p2 = {"x": center_x + ruler_length/2, "y": center_y}
         elif mode == "polygon":
             self.config["show_fractions"] = False
             # Update input label for polygon sides
@@ -970,8 +1203,29 @@ class ProRuler:
                 self.number_input.config(from_=3, to=20)
                 self.number_input.delete(0, 'end')
                 self.number_input.insert(0, str(self.config["polygon_sides"]))
+            # Initialize polygon at preserved center position
             if not self.polygon_points:
-                self.init_polygon_default()
+                self.init_polygon_at_position(center_x, center_y)
+            else:
+                # Move existing polygon to center position
+                old_center_x = sum(p["x"] for p in self.polygon_points) / len(self.polygon_points)
+                old_center_y = sum(p["y"] for p in self.polygon_points) / len(self.polygon_points)
+                dx = center_x - old_center_x
+                dy = center_y - old_center_y
+                for p in self.polygon_points:
+                    p["x"] += dx
+                    p["y"] += dy
+        elif mode == "angle":
+            self.config["show_fractions"] = False
+            # Move angle mode to preserved center position
+            self.angle_center = {"x": center_x, "y": center_y}
+            self.angle_arm1 = {"x": center_x - 200, "y": center_y}
+            self.angle_arm2 = {"x": center_x, "y": center_y - 200}
+        elif mode == "ruler":
+            self.config["show_fractions"] = False
+            # Move ruler to preserved center position
+            self.p1 = {"x": center_x - 350, "y": center_y}
+            self.p2 = {"x": center_x + 350, "y": center_y}
         else:
             self.config["show_fractions"] = False
             # Hide or show number input as needed
@@ -993,12 +1247,194 @@ class ProRuler:
         
         self.draw()
     
-    def init_polygon_with_sides(self, sides):
-        """Initialize polygon with specified number of sides"""
+    def toggle_text_mode(self):
+        """Toggle text mode on/off"""
+        self.text_mode_active = not self.text_mode_active
+        
+        # Show/hide text formatting toolbar and resize window
+        if self.text_mode_active:
+            # Pack the text toolbar frame in the body frame
+            if hasattr(self, 'text_toolbar_frame') and self.text_toolbar_frame:
+                self.text_toolbar_frame.pack(fill='x', pady=(4, 0))
+            # Highlight text button
+            if "text" in self.mode_buttons:
+                self.mode_buttons["text"].config(bg='#5294e2', fg='white')
+            # Expand toolbar height to 245px
+            if self.toolbar and self.toolbar.winfo_exists():
+                current_width = self.toolbar.winfo_width()
+                toolbar_x = self.toolbar.winfo_x()
+                toolbar_y = self.toolbar.winfo_y()
+                self.toolbar.geometry(f"{current_width}x245+{toolbar_x}+{toolbar_y}")
+            self.show_notification("Text Mode: Active - Click 'Add' or press Enter to add text")
+        else:
+            if hasattr(self, 'text_toolbar_frame') and self.text_toolbar_frame:
+                self.text_toolbar_frame.pack_forget()
+            # Unhighlight text button
+            if "text" in self.mode_buttons:
+                self.mode_buttons["text"].config(bg='#fbfbfc', fg='#5c616c')
+            # Restore toolbar height to 155px
+            if self.toolbar and self.toolbar.winfo_exists():
+                current_width = self.toolbar.winfo_width()
+                toolbar_x = self.toolbar.winfo_x()
+                toolbar_y = self.toolbar.winfo_y()
+                self.toolbar.geometry(f"{current_width}x155+{toolbar_x}+{toolbar_y}")
+            self.show_notification("Text Mode: Inactive")
+        
+        self.draw()
+    
+    def add_text_object(self):
+        """Add a new text object to the screen"""
+        if not self.text_mode_active:
+            return
+        
+        text_content = self.text_input_var.get()
+        if not text_content or text_content.strip() == "":
+            text_content = "Your text here"
+        
+        # Create new text object at center of screen
+        center_x = self.virtual_x + (self.virtual_w / 2)
+        center_y = self.virtual_y + (self.virtual_h / 2)
+        
+        text_obj = {
+            "x": center_x - 100,
+            "y": center_y - 50,
+            "width": 200,
+            "height": 100,
+            "text": text_content,
+            "font_family": self.text_font_family,
+            "font_size": self.text_font_size,
+            "bold": self.text_bold,
+            "italic": self.text_italic,
+            "underline": self.text_underline,
+            "outline": self.text_outline
+        }
+        
+        self.text_objects.append(text_obj)
+        self.draw()
+        self.show_notification(f"Added text: '{text_content[:20]}...'")
+    
+    def update_text_font_size(self):
+        """Update text font size and apply to all existing text objects"""
         try:
-            # Use current screen dimensions
-            cx = self.virtual_x + (self.virtual_w / 2)
-            cy = self.virtual_y + (self.virtual_h / 2)
+            self.text_font_size = int(self.font_size_spinbox.get())
+            # Update all existing text objects with new font size
+            for text_obj in self.text_objects:
+                text_obj["font_size"] = self.text_font_size
+            self.draw()
+        except Exception:
+            self.text_font_size = 24
+            self.font_size_spinbox.delete(0, 'end')
+            self.font_size_spinbox.insert(0, "24")
+    
+    def update_text_font_family(self, event=None):
+        """Update text font family and apply to all existing text objects"""
+        self.text_font_family = self.font_family_dropdown.get()
+        # Update all existing text objects with new font family
+        for text_obj in self.text_objects:
+            text_obj["font_family"] = self.text_font_family
+        self.draw()
+    
+    def toggle_bold(self):
+        """Toggle bold text and apply to all existing text objects"""
+        self.text_bold = not self.text_bold
+        if self.text_bold:
+            self.bold_btn.config(bg='#5294e2', fg='white')
+        else:
+            self.bold_btn.config(bg='#fbfbfc', fg='#5c616c')
+        # Update all existing text objects with new bold setting
+        for text_obj in self.text_objects:
+            text_obj["bold"] = self.text_bold
+        self.draw()
+    
+    def toggle_italic(self):
+        """Toggle italic text and apply to all existing text objects"""
+        self.text_italic = not self.text_italic
+        if self.text_italic:
+            self.italic_btn.config(bg='#5294e2', fg='white')
+        else:
+            self.italic_btn.config(bg='#fbfbfc', fg='#5c616c')
+        # Update all existing text objects with new italic setting
+        for text_obj in self.text_objects:
+            text_obj["italic"] = self.text_italic
+        self.draw()
+    
+    def toggle_underline(self):
+        """Toggle underline text and apply to all existing text objects"""
+        self.text_underline = not self.text_underline
+        if self.text_underline:
+            self.underline_btn.config(bg='#5294e2', fg='white')
+        else:
+            self.underline_btn.config(bg='#fbfbfc', fg='#5c616c')
+        # Update all existing text objects with new underline setting
+        for text_obj in self.text_objects:
+            text_obj["underline"] = self.text_underline
+        self.draw()
+    
+    def toggle_outline(self):
+        """Toggle text box outline and apply to all existing text objects"""
+        self.text_outline = not self.text_outline
+        if self.text_outline:
+            self.outline_btn.config(bg='#5294e2', fg='white')
+        else:
+            self.outline_btn.config(bg='#fbfbfc', fg='#5c616c')
+        # Update all existing text objects with new outline setting
+        for text_obj in self.text_objects:
+            text_obj["outline"] = self.text_outline
+        self.draw()
+    
+    def delete_text_object(self, event=None):
+        """Delete the selected text object, or last added if none selected"""
+        if self.text_objects:
+            if self.selected_text_index is not None and 0 <= self.selected_text_index < len(self.text_objects):
+                # Delete the selected text object
+                deleted = self.text_objects.pop(self.selected_text_index)
+                self.selected_text_index = None  # Clear selection
+                self.draw()
+                self.show_notification(f"Deleted selected text: '{deleted['text'][:20]}...'")
+            else:
+                # Delete the last text object if none selected
+                deleted = self.text_objects.pop()
+                self.draw()
+                self.show_notification(f"Deleted text: '{deleted['text'][:20]}...'")
+        else:
+            self.show_notification("No text objects to delete")
+    
+    def clear_all_text_objects(self):
+        """Clear all text objects"""
+        if self.text_objects:
+            count = len(self.text_objects)
+            self.text_objects = []
+            self.draw()
+            self.show_notification(f"Cleared {count} text object(s)")
+        else:
+            self.show_notification("No text objects to clear")
+    
+    def toggle_text_visibility(self):
+        """Toggle visibility of all text objects"""
+        self.text_visible = not self.text_visible
+        self.draw()
+        status = "Visible" if self.text_visible else "Hidden"
+        self.show_notification(f"Text: {status}")
+        
+        # Update eye button appearance if it exists
+        if hasattr(self, 'text_visibility_btn'):
+            if self.text_visible:
+                self.text_visibility_btn.config(text="👁", bg='#5294e2', fg='white')
+            else:
+                self.text_visibility_btn.config(text="👁", bg='#fbfbfc', fg='#5c616c')
+    
+    def init_polygon_with_sides(self, sides):
+        """Initialize polygon with specified number of sides, preserving current center position"""
+        try:
+            # Calculate current center position if polygon already exists
+            if self.polygon_points:
+                cx = sum(p["x"] for p in self.polygon_points) / len(self.polygon_points)
+                cy = sum(p["y"] for p in self.polygon_points) / len(self.polygon_points)
+            else:
+                # Use screen center if no polygon exists yet
+                cx = self.virtual_x + (self.virtual_w / 2)
+                cy = self.virtual_y + (self.virtual_h / 2)
+            
             radius = 150
             self.polygon_points = []
             
@@ -1038,17 +1474,17 @@ class ProRuler:
                 if self.config["lock_angle"] == 0:
                     self.lock_button.config(text="🔒H", font=('Segoe UI', 9, 'bold'))
                     self.lock_status_var.set("Horizontal")
-                    if hasattr(self, 'lock_label') and self.lock_label.winfo_exists():
+                    if self.lock_label and self.lock_label.winfo_exists():
                         self.lock_label.config(text="Horizontal")
                 elif self.config["lock_angle"] == 90:
                     self.lock_button.config(text="🔒V", font=('Segoe UI', 9, 'bold'))
                     self.lock_status_var.set("Vertical")
-                    if hasattr(self, 'lock_label') and self.lock_label.winfo_exists():
+                    if self.lock_label and self.lock_label.winfo_exists():
                         self.lock_label.config(text="Vertical")
                 else:
                     self.lock_button.config(text="🔓", font=('Segoe UI', 9, 'bold'))
                     self.lock_status_var.set("None")
-                    if hasattr(self, 'lock_label') and self.lock_label.winfo_exists():
+                    if self.lock_label and self.lock_label.winfo_exists():
                         self.lock_label.config(text="None")
         except tk.TclError:
             # Widget no longer exists
@@ -1178,9 +1614,9 @@ class ProRuler:
             icon_path = os.path.join(os.path.dirname(__file__), 'Icon.ico')
             
             # Check if running as a bundled executable
-            if getattr(sys, 'frozen', False):
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
                 # Running as compiled executable
-                icon_path = os.path.join(sys._MEIPASS, 'Icon.ico')
+                icon_path = os.path.join(getattr(sys, '_MEIPASS', ''), 'Icon.ico')
             
             # Load icon image
             if os.path.exists(icon_path):
@@ -1260,62 +1696,20 @@ class ProRuler:
         self.control_panel.title("ScreenRuler Pro - Control Panel")
         self.control_panel.geometry("580x600")
         self.control_panel.attributes('-topmost', True)
+        self.control_panel.attributes('-alpha', 0.95)
         self.control_panel.resizable(False, False)
         self.control_panel.configure(bg='#f5f6f7')
-        self.control_panel.overrideredirect(True)
         
-        # Prevent minimize
-        self.control_panel.protocol("WM_DELETE_WINDOW", self.control_panel.destroy)
-        
-        # Custom title bar with close and minimize buttons
-        titlebar = tk.Frame(self.control_panel, bg='#5294e2', height=35)
-        titlebar.pack(fill='x')
-        titlebar.pack_propagate(False)
-        
-        # Title
-        tk.Label(titlebar, text="ScreenRuler Pro - Control Panel", 
-            font=('Segoe UI', 10, 'bold'), fg='white', bg='#5294e2').pack(side='left', padx=10)
-        
-        # Close button
-        close_btn = tk.Button(titlebar, text="✕", font=('Arial', 11, 'bold'), bg='#f46067', fg='white',
-                      command=self.control_panel.destroy, width=3, relief=tk.FLAT, cursor='hand2',
-                      bd=0, activebackground='#f13039')
-        close_btn.pack(side='right', padx=2)
-        close_btn.bind("<Enter>", lambda e: e.widget.config(bg='#f13039'))
-        close_btn.bind("<Leave>", lambda e: e.widget.config(bg='#f46067'))
-        
-        # Minimize button
-        min_btn = tk.Button(titlebar, text="─", font=('Arial', 10, 'bold'), bg='#5294e2', fg='white',
-                    command=lambda: self.control_panel.iconify(), width=3, relief=tk.FLAT,
-                    cursor='hand2', bd=0, activebackground='#4a85d4')
-        min_btn.pack(side='right', padx=2)
-        min_btn.bind("<Enter>", lambda e: e.widget.config(bg='#4a85d4'))
-        min_btn.bind("<Leave>", lambda e: e.widget.config(bg='#5294e2'))
-        
-        # Make window draggable
-        titlebar.bind('<Button-1>', self.start_move_control_panel)
-        titlebar.bind('<B1-Motion>', self.do_move_control_panel)
-        [child.bind('<Button-1>', self.start_move_control_panel) for child in titlebar.winfo_children()]
-        [child.bind('<B1-Motion>', self.do_move_control_panel) for child in titlebar.winfo_children()]
-        
-        # Reuse app-wide style and align with Arc theme
-        style = self.style if hasattr(self, 'style') else ttk.Style(self.control_panel)
+        # Set window icon if available
         try:
-            style.configure('TNotebook', background='#f5f6f7', borderwidth=0)
-            style.configure('TNotebook.Tab', 
-                           padding=[18, 10],
-                           font=('Segoe UI', 11, 'bold'),
-                           background='#d3dae3',
-                           foreground='#5c616c')
-            style.map('TNotebook.Tab',
-                     expand=[('selected', [1, 1, 1, 0])],
-                     background=[('selected', '#5294e2')],
-                     foreground=[('selected', '#2c3e50')])
-            style.configure('TFrame', background='#f5f6f7')
-            style.configure('TLabelframe', background='white', foreground='#5c616c')
-            style.configure('TLabelframe.Label', background='white', foreground='#5c616c')
+            icon_path = os.path.join(os.path.dirname(__file__), 'Icon.ico')
+            if os.path.exists(icon_path):
+                self.control_panel.iconbitmap(icon_path)
         except Exception:
             pass
+        
+        # Close panel when closed
+        self.control_panel.protocol("WM_DELETE_WINDOW", self.control_panel.destroy)
         
         # Create notebook for tabs
         self.control_notebook = ttk.Notebook(self.control_panel)
@@ -1328,6 +1722,10 @@ class ProRuler:
         
         # Select requested tab
         self.control_notebook.select(tab_index)
+        
+        # If settings tab and sub_tab_index specified, switch to that sub-tab
+        if tab_index == 0 and sub_tab_index > 0 and hasattr(self, 'settings_notebook'):
+            self.settings_notebook.select(sub_tab_index)
         
         # Footer with close button
         footer_frame = tk.Frame(self.control_panel, bg='#f5f6f7', height=60)
@@ -1349,19 +1747,6 @@ class ProRuler:
                              borderwidth=0)
         close_btn.pack()
 
-    def start_move_control_panel(self, event):
-        """Start moving the control panel window"""
-        self.control_panel_x = event.x
-        self.control_panel_y = event.y
-    
-    def do_move_control_panel(self, event):
-        """Move the control panel window"""
-        deltax = event.x - self.control_panel_x
-        deltay = event.y - self.control_panel_y
-        x = self.control_panel.winfo_x() + deltax
-        y = self.control_panel.winfo_y() + deltay
-        self.control_panel.geometry(f"+{x}+{y}")
-    
     def create_help_tab(self, notebook):
         """Create Help tab"""
         help_frame = ttk.Frame(notebook)
@@ -1392,6 +1777,7 @@ A  - Open About Tab
 C  - Copy Measurement to Clipboard
 R  - Reset Ruler Position
 M  - Cycle Mode (Ruler/Fractions/Angle)
+E  - Cycle Endpoint Style
 G  - Toggle Guide Lines
 V  - Toggle Ruler Labels
 L  - Cycle Lock (None/Horizontal/Vertical)
@@ -1404,8 +1790,20 @@ F  - Toggle Fraction Mode
 .  - Increase Thickness
 +  - Increase Opacity
 -  - Decrease Opacity
+Del/Backspace - Delete Selected Text (click text first)
+B  - Toggle Toolbar Visibility
 Space - Minimize to Tray
 Esc   - Exit Application
+
+TEXT MODE
+=====================================
+
+  • Click text mode button (A) in toolbar
+  • Enter text and click Add or press Enter
+  • Click and drag text to reposition
+  • Click text to select it (gold border)
+  • Press Delete to remove selected text
+  • Use formatting toolbar for font/style
 
 MEASUREMENT MODES
 =====================================
@@ -1445,6 +1843,43 @@ CURSOR FEEDBACK
   • 4-way Arrow - Over line/center (move)
   • Hand - Over info box (drag)
 
+ONSCREEN TEXT ANNOTATIONS
+=====================================
+
+  • Add persistent text labels to your screen
+  • Reposition by clicking and dragging
+  • Select text by clicking (gold border)
+  • Delete selected text with Delete key
+  • Click selected text again to deselect
+  • Click anywhere else to clear selection
+  
+  Formatting Options:
+  • Change font family and size
+  • Bold, Italic, Underline styles
+  • Optional text box outline
+  • Show/hide all text with eye button
+  • Clear all text at once
+
+ENDPOINT STYLES
+=====================================
+
+  • None - Simple line endpoints
+  • Circle - Circular markers at ends
+  • Square - Square markers at ends
+  • Crosslines - Crosshair markers
+  • Arrow - Directional arrow heads
+  
+  Press 'E' to cycle through styles
+
+TOOLBAR CONTROLS
+=====================================
+
+  • 🢓 - Minimize entire app to system tray
+  • ─ - Minimize toolbar only (ruler stays visible)
+  • ✕ - Close application
+  • Press 'B' to toggle toolbar visibility
+  • Press Space to minimize to system tray
+
 FEATURES
 =====================================
   • Multiple measurement modes
@@ -1452,10 +1887,13 @@ FEATURES
   • Angle measurement
   • Calibration system
   • Fraction mode
+  • Onscreen text annotations
   • System tray support
   • Customizable themes
   • Real-time settings preview
   • Click-through capability
+  • Toolbar minimize options
+  • Text selection & deletion
 
 CALIBRATION
 =====================================
@@ -1471,9 +1909,11 @@ TIPS
   • Lock angle for straight measurements
   • Copy measurements to clipboard
   • Calibrate for accurate real-world units
-  • Minimize to tray when not in use
+  • Minimize toolbar only to keep ruler visible
+  • Add text labels for reference points
   • Use angle mode for corner measurements
   • Switch modes with 'M' key
+  • Cycle endpoint styles with 'E' key
 """
         
         help_text_widget.insert('1.0', help_content)
@@ -1513,9 +1953,10 @@ TIPS
         
         def apply_and_save():
             self.save_config()
+            parent_window = self.control_panel if self.control_panel and self.control_panel.winfo_exists() else self.root
             messagebox.showinfo("Settings Saved", 
                               "✅ All settings have been saved successfully!", 
-                              parent=self.control_panel)
+                              parent=parent_window)
         
         tk.Button(button_frame, text="💾  Save All Settings", 
                  command=apply_and_save,
@@ -1546,7 +1987,7 @@ TIPS
         canvas.configure(yscrollcommand=scrollbar.set)
         
         # Theme selection
-        tk.Label(scrollable_frame, text="Theme:", font=("Arial", 10, "bold")).pack(anchor='w', padx=10, pady=(10,5))
+        ttk.Label(scrollable_frame, text="Theme:", font=("Arial", 10, "bold")).pack(anchor='w', padx=10, pady=(10,5))
         theme_var = tk.StringVar(value=self.config["theme"])
         
         def update_theme(t):
@@ -1555,12 +1996,12 @@ TIPS
             self.draw()
             
         for theme_name in self.themes.keys():
-            tk.Radiobutton(scrollable_frame, text=theme_name.capitalize(), 
+            ttk.Radiobutton(scrollable_frame, text=theme_name.capitalize(), 
                           variable=theme_var, value=theme_name,
                           command=lambda t=theme_name: update_theme(t)).pack(anchor='w', padx=30)
         
         # Mode selection
-        tk.Label(scrollable_frame, text="Measurement Mode:", font=("Arial", 10, "bold")).pack(anchor='w', padx=10, pady=(15,5))
+        ttk.Label(scrollable_frame, text="Measurement Mode:", font=("Arial", 10, "bold")).pack(anchor='w', padx=10, pady=(15,5))
         mode_var = tk.StringVar(value=self.config["mode"])
         modes = [("Ruler", "ruler"), ("Fractions", "fractions"), ("Angle", "angle"), ("Polygon", "polygon")]
         
@@ -1587,12 +2028,12 @@ TIPS
             self.draw()
         
         for text, value in modes:
-            tk.Radiobutton(scrollable_frame, text=text, 
+            ttk.Radiobutton(scrollable_frame, text=text, 
                           variable=mode_var, value=value,
                           command=update_mode).pack(anchor='w', padx=30)
         
         # Opacity
-        tk.Label(scrollable_frame, text="Work Mode Opacity:", font=("Arial", 10, "bold")).pack(anchor='w', padx=10, pady=(15,5))
+        ttk.Label(scrollable_frame, text="Work Mode Opacity:", font=("Arial", 10, "bold")).pack(anchor='w', padx=10, pady=(15,5))
         opacity_var = tk.DoubleVar(value=self.config["opacity_work"])
         
         def update_opacity(val):
@@ -1626,6 +2067,26 @@ TIPS
         ttk.Checkbutton(scrollable_frame, text="Show Ruler Labels",
                        variable=labels_var,
                        command=update_labels).pack(anchor='w', padx=30, pady=5)
+        
+        # Ruler Endpoint Style
+        ttk.Label(scrollable_frame, text="Ruler Endpoint Style:", font=("Arial", 10, "bold")).pack(anchor='w', padx=10, pady=(15,5))
+        endpoint_var = tk.StringVar(value=self.config.get("endpoint_style", "circle"))
+        endpoint_styles = [
+            ("None", "none"),
+            ("Circle", "circle"),
+            ("Square", "flat"),
+            ("Crosslines", "crosslines"),
+            ("Arrow", "arrow")
+        ]
+        
+        def update_endpoint_style():
+            self.config["endpoint_style"] = endpoint_var.get()
+            self.draw()
+        
+        for text, value in endpoint_styles:
+            ttk.Radiobutton(scrollable_frame, text=text, 
+                          variable=endpoint_var, value=value,
+                          command=update_endpoint_style).pack(anchor='w', padx=30)
         
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -1729,9 +2190,9 @@ TIPS
         notebook.add(calibration_frame, text="Calibration")
         
         # Create scrollable frame
-        canvas = tk.Canvas(calibration_frame, bg='white')
+        canvas = tk.Canvas(calibration_frame, bg='#f8f9fa', highlightthickness=0)
         scrollbar = ttk.Scrollbar(calibration_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
+        scrollable_frame = tk.Frame(canvas, bg='#f8f9fa')
         
         scrollable_frame.bind(
             "<Configure>",
@@ -1741,41 +2202,95 @@ TIPS
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         
-        # Instructions
-        title_label = ttk.Label(scrollable_frame,
-                               text="🎯 Calibration Methods",
-                               font=("Arial", 12, "bold"),
-                               foreground="#5c616c")
-        title_label.pack(anchor='w', padx=10, pady=(15,10))
+        # Container with reduced padding
+        container = tk.Frame(scrollable_frame, bg='#f8f9fa')
+        container.pack(fill='both', expand=True, padx=15, pady=10)
         
-        # Current measurement display
+        # Compact title section
+        title_frame = tk.Frame(container, bg='white', relief=tk.FLAT)
+        title_frame.pack(fill='x', pady=(0, 10))
+        
+        title_inner = tk.Frame(title_frame, bg='white')
+        title_inner.pack(fill='x', padx=15, pady=10)
+        
+        title_label = tk.Label(title_inner,
+                              text="🎯 Calibration",
+                              font=("Segoe UI", 12, "bold"),
+                              fg="#2d3436", bg='white')
+        title_label.pack(anchor='w')
+        
+        # Current measurement display - more compact
         dist = self.get_distance()
-        current_display = ttk.Label(scrollable_frame,
-                                   text=f"Current ruler length: {self.format_distance(dist)}",
-                                   font=("Arial", 10, "bold"),
-                                   foreground="#5294e2")
-        current_display.pack(anchor='w', padx=10, pady=10)
+        measure_frame = tk.Frame(title_inner, bg='#e8f4f8', relief=tk.FLAT)
+        measure_frame.pack(fill='x', pady=(8, 0))
         
-        # Method 1: Simple calibration
-        method1_frame = ttk.LabelFrame(scrollable_frame, text="Method 1: Simple Calibration (Recommended)",
-                                      padding=(10, 10))
-        method1_frame.pack(fill='x', padx=10, pady=10)
+        current_display = tk.Label(measure_frame,
+                                  text=f"📐 Current: {self.format_distance(dist)}",
+                                  font=("Segoe UI", 10, "bold"),
+                                  fg="#2c7a9e", bg='#e8f4f8')
+        current_display.pack(padx=12, pady=8)
         
-        instructions1 = ttk.Label(method1_frame,
-                                 text="1. Measure a known object (e.g., a 10cm ruler)\n2. Enter the actual/known value below\n3. Click 'Calibrate'",
-                                 font=("Arial", 9),
-                                 justify=tk.LEFT)
-        instructions1.pack(anchor='w', pady=5)
+        # Method 1: Simple calibration card - more compact
+        method1_card = tk.Frame(container, bg='white', relief=tk.FLAT)
+        method1_card.pack(fill='x', pady=(0, 10))
         
-        known_frame = tk.Frame(method1_frame)
-        known_frame.pack(anchor='w', pady=10)
+        # Method 1 header with badge
+        m1_header = tk.Frame(method1_card, bg='#d4edda')
+        m1_header.pack(fill='x')
         
-        ttk.Label(known_frame, text="Known Value:", font=("Arial", 9)).pack(side='left', padx=5)
+        m1_title_frame = tk.Frame(m1_header, bg='#d4edda')
+        m1_title_frame.pack(anchor='w', padx=15, pady=8)
+        
+        tk.Label(m1_title_frame, text="✓", font=("Arial", 11, "bold"), 
+                fg="#155724", bg='#d4edda').pack(side='left', padx=(0, 6))
+        tk.Label(m1_title_frame, text="Simple Calibration",
+                font=("Segoe UI", 10, "bold"),
+                fg="#155724", bg='#d4edda').pack(side='left')
+        tk.Label(m1_title_frame, text="RECOMMENDED",
+                font=("Segoe UI", 7, "bold"),
+                fg="#155724", bg='#c3e6cb',
+                relief=tk.FLAT).pack(side='left', padx=8, ipadx=5, ipady=1)
+        
+        # Method 1 content - more compact
+        m1_content = tk.Frame(method1_card, bg='white')
+        m1_content.pack(fill='x', padx=15, pady=10)
+        
+        instructions1 = tk.Label(m1_content,
+                                text="1. Measure a known object\n2. Enter the known value below\n3. Click Calibrate",
+                                font=("Segoe UI", 9),
+                                fg="#6c757d", bg='white',
+                                justify=tk.LEFT)
+        instructions1.pack(anchor='w', pady=(0, 8))
+        
+        # Input section with better styling
+        input_container = tk.Frame(m1_content, bg='#f8f9fa', relief=tk.FLAT)
+        input_container.pack(fill='x', pady=6)
+        
+        known_frame = tk.Frame(input_container, bg='#f8f9fa')
+        known_frame.pack(padx=12, pady=10)
+        
+        tk.Label(known_frame, text="Known Value:", 
+                font=("Segoe UI", 9, "bold"),
+                fg="#495057", bg='#f8f9fa').pack(side='left', padx=(0, 6))
+        
         known_var = tk.DoubleVar(value=10.0)
-        known_entry = ttk.Entry(known_frame, textvariable=known_var, width=10, font=("Arial", 10))
-        known_entry.pack(side='left', padx=5)
+        known_entry = tk.Entry(known_frame, textvariable=known_var, 
+                              width=10, font=("Segoe UI", 10),
+                              relief=tk.FLAT, bg='white', fg='#212529',
+                              highlightthickness=1, highlightcolor='#5294e2',
+                              highlightbackground='#ced4da')
+        known_entry.pack(side='left', padx=4, ipady=3)
         
-        ttk.Label(known_frame, text=self.config["unit"], font=("Arial", 9)).pack(side='left', padx=5)
+        # Unit label that updates dynamically
+        unit_label = tk.Label(known_frame, text=self.config["unit"], 
+                             font=("Segoe UI", 9),
+                             fg="#6c757d", bg='#f8f9fa')
+        unit_label.pack(side='left', padx=(4, 6))
+        
+        # Store reference for updating
+        if not hasattr(self, 'calibration_unit_labels'):
+            self.calibration_unit_labels = []
+        self.calibration_unit_labels.append(unit_label)
         
         def calibrate_simple():
             known_value = known_var.get()
@@ -1802,74 +2317,139 @@ TIPS
                 self.config["calibration_factor"] = known_value / current_value
                 self.save_config()
                 self.draw()
-                current_display.config(text=f"Current ruler length: {self.format_distance(dist)}")
+                current_display.config(text=f"📐 Current: {self.format_distance(dist)}")
+                parent_window = self.control_panel if self.control_panel and self.control_panel.winfo_exists() else self.root
                 messagebox.showinfo("Calibration", 
                                    f"Calibrated!\nFactor: {self.config['calibration_factor']:.4f}", 
-                                   parent=self.control_panel)
+                                   parent=parent_window)
         
-        tk.Button(known_frame, text="Calibrate",
-                 command=calibrate_simple,
-                 bg="#5294e2", fg="white", 
-                 font=("Arial", 9, "bold"),
-                 padx=15, pady=3).pack(side='left', padx=5)
+        cal_btn = tk.Button(known_frame, text="🎯 Calibrate",
+                           command=calibrate_simple,
+                           bg="#28a745", fg="white", 
+                           font=("Segoe UI", 9, "bold"),
+                           padx=16, pady=5,
+                           relief=tk.FLAT,
+                           cursor="hand2",
+                           activebackground="#218838",
+                           borderwidth=0)
+        cal_btn.pack(side='left', padx=6)
+        cal_btn.bind("<Enter>", lambda e: cal_btn.config(bg="#218838"))
+        cal_btn.bind("<Leave>", lambda e: cal_btn.config(bg="#28a745"))
         
-        # Method 2: Manual factor
-        method2_frame = ttk.LabelFrame(scrollable_frame, text="Method 2: Manual Calibration Factor",
-                                      padding=(10, 10))
-        method2_frame.pack(fill='x', padx=10, pady=10)
+        # Method 2: Manual factor card - more compact
+        method2_card = tk.Frame(container, bg='white', relief=tk.FLAT)
+        method2_card.pack(fill='x', pady=(0, 10))
         
-        instructions2 = ttk.Label(method2_frame,
-                                 text="For advanced users: Directly set the calibration factor\nFormula: Known Value ÷ Displayed Value",
-                                 font=("Arial", 9),
-                                 justify=tk.LEFT)
-        instructions2.pack(anchor='w', pady=5)
+        # Method 2 header
+        m2_header = tk.Frame(method2_card, bg='#fff3cd')
+        m2_header.pack(fill='x')
         
-        factor_frame = tk.Frame(method2_frame)
-        factor_frame.pack(anchor='w', pady=10)
+        m2_title_frame = tk.Frame(m2_header, bg='#fff3cd')
+        m2_title_frame.pack(anchor='w', padx=15, pady=8)
         
-        ttk.Label(factor_frame, text="Calibration Factor:", font=("Arial", 9)).pack(side='left', padx=5)
+        tk.Label(m2_title_frame, text="⚙️", font=("Arial", 11), 
+                bg='#fff3cd').pack(side='left', padx=(0, 6))
+        tk.Label(m2_title_frame, text="Manual Factor",
+                font=("Segoe UI", 10, "bold"),
+                fg="#856404", bg='#fff3cd').pack(side='left')
+        tk.Label(m2_title_frame, text="ADVANCED",
+                font=("Segoe UI", 7, "bold"),
+                fg="#856404", bg='#ffeaa7',
+                relief=tk.FLAT).pack(side='left', padx=8, ipadx=5, ipady=1)
+        
+        # Method 2 content
+        m2_content = tk.Frame(method2_card, bg='white')
+        m2_content.pack(fill='x', padx=15, pady=10)
+        
+        instructions2 = tk.Label(m2_content,
+                                text="Directly set calibration factor (Known ÷ Displayed)",
+                                font=("Segoe UI", 9),
+                                fg="#6c757d", bg='white',
+                                justify=tk.LEFT)
+        instructions2.pack(anchor='w', pady=(0, 8))
+        
+        # Input section
+        input_container2 = tk.Frame(m2_content, bg='#f8f9fa', relief=tk.FLAT)
+        input_container2.pack(fill='x', pady=6)
+        
+        factor_frame = tk.Frame(input_container2, bg='#f8f9fa')
+        factor_frame.pack(padx=12, pady=10)
+        
+        tk.Label(factor_frame, text="Factor:", 
+                font=("Segoe UI", 9, "bold"),
+                fg="#495057", bg='#f8f9fa').pack(side='left', padx=(0, 6))
+        
         cal_var = tk.DoubleVar(value=self.config["calibration_factor"])
-        cal_entry = ttk.Entry(factor_frame, textvariable=cal_var, width=10, font=("Arial", 10))
-        cal_entry.pack(side='left', padx=5)
+        cal_entry = tk.Entry(factor_frame, textvariable=cal_var, 
+                            width=10, font=("Segoe UI", 10),
+                            relief=tk.FLAT, bg='white', fg='#212529',
+                            highlightthickness=1, highlightcolor='#5294e2',
+                            highlightbackground='#ced4da')
+        cal_entry.pack(side='left', padx=4, ipady=3)
         
         def apply_manual_calibration():
             self.config["calibration_factor"] = cal_var.get()
             self.draw()
-            current_display.config(text=f"Current ruler length: {self.format_distance(dist)}")
-            messagebox.showinfo("Calibration", "Manual calibration applied!", parent=self.control_panel)
+            current_display.config(text=f"📐 Current: {self.format_distance(dist)}")
+            parent_window = self.control_panel if self.control_panel and self.control_panel.winfo_exists() else self.root
+            messagebox.showinfo("Calibration", "Manual calibration applied!", parent=parent_window)
         
-        tk.Button(factor_frame, text="Apply",
-                 command=apply_manual_calibration,
-                 bg="#5294e2", fg="white", 
-                 font=("Arial", 9, "bold"),
-                 padx=15, pady=3).pack(side='left', padx=5)
+        apply_btn = tk.Button(factor_frame, text="✓ Apply",
+                             command=apply_manual_calibration,
+                             bg="#5294e2", fg="white", 
+                             font=("Segoe UI", 9, "bold"),
+                             padx=16, pady=5,
+                             relief=tk.FLAT,
+                             cursor="hand2",
+                             activebackground="#4a85d4",
+                             borderwidth=0)
+        apply_btn.pack(side='left', padx=6)
+        apply_btn.bind("<Enter>", lambda e: apply_btn.config(bg="#4a85d4"))
+        apply_btn.bind("<Leave>", lambda e: apply_btn.config(bg="#5294e2"))
         
-        # Reset calibration
-        reset_frame = tk.Frame(scrollable_frame)
-        reset_frame.pack(anchor='w', padx=10, pady=15)
+        # Reset section - centered
+        reset_card = tk.Frame(container, bg='white', relief=tk.FLAT)
+        reset_card.pack(fill='x', pady=(0, 10))
+        
+        reset_content = tk.Frame(reset_card, bg='white')
+        reset_content.pack(padx=12, pady=10)
         
         def reset_calibration():
             cal_var.set(1.0)
             self.config["calibration_factor"] = 1.0
             self.draw()
-            current_display.config(text=f"Current ruler length: {self.format_distance(dist)}")
-            messagebox.showinfo("Calibration", "Calibration reset to default (1.0)", parent=self.control_panel)
+            current_display.config(text=f"📐 Current: {self.format_distance(dist)}")
+            parent_window = self.control_panel if self.control_panel and self.control_panel.winfo_exists() else self.root
+            messagebox.showinfo("Calibration", "Reset to default (1.0)", parent=parent_window)
         
-        tk.Button(reset_frame, text="🔄 Reset to Default (1.0)",
-                 command=reset_calibration,
-                 bg="#d3dae3", fg="#5c616c", 
-                 font=("Arial", 9, "bold"),
-                 padx=15, pady=5).pack()
+        reset_btn = tk.Button(reset_content, text="🔄 Reset (1.0)",
+                             command=reset_calibration,
+                             bg="#6c757d", fg="white", 
+                             font=("Segoe UI", 9, "bold"),
+                             padx=18, pady=6,
+                             relief=tk.FLAT,
+                             cursor="hand2",
+                             activebackground="#5a6268",
+                             borderwidth=0)
+        reset_btn.pack()
+        reset_btn.bind("<Enter>", lambda e: reset_btn.config(bg="#5a6268"))
+        reset_btn.bind("<Leave>", lambda e: reset_btn.config(bg="#6c757d"))
         
-        # Example
-        example_frame = ttk.LabelFrame(scrollable_frame, text="Example",
-                                      padding=(10, 10))
-        example_frame.pack(fill='x', padx=10, pady=10)
+        # Example card - below reset
+        example_card = tk.Frame(container, bg='white', relief=tk.FLAT)
+        example_card.pack(fill='x', pady=(0, 5))
         
-        example_text = "If you measure a 10cm ruler and it shows 9.5cm:\n\nMethod 1: Enter '10' as known value, click Calibrate\nMethod 2: Calculate 10 ÷ 9.5 = 1.053, enter manually"
-        ttk.Label(example_frame, text=example_text,
-                 font=("Arial", 8), foreground="#555555",
-                 justify=tk.LEFT).pack(anchor='w')
+        ex_content = tk.Frame(example_card, bg='white')
+        ex_content.pack(fill='x', padx=12, pady=10)
+        
+        tk.Label(ex_content, text="💡 Example:",
+                font=("Segoe UI", 9, "bold"),
+                fg="#004085", bg='white').pack(anchor='w')
+        
+        example_text = "Measure 10cm, shows 9.5cm\n→ Enter 10, click Calibrate\n→ Or: 10÷9.5=1.053"
+        tk.Label(ex_content, text=example_text,
+                font=("Segoe UI", 8), fg="#495057", bg='white',
+                justify=tk.LEFT).pack(anchor='w', pady=(4, 0))
         
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -1880,9 +2460,9 @@ TIPS
         notebook.add(about_frame, text="  ℹ️ About  ")
         
         # Create canvas with scrollbar for scrollable content
-        canvas = tk.Canvas(about_frame, bg='white', highlightthickness=0)
+        canvas = tk.Canvas(about_frame, bg='#f8f9fa', highlightthickness=0)
         scrollbar = ttk.Scrollbar(about_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg='white')
+        scrollable_frame = tk.Frame(canvas, bg='#f8f9fa')
         
         scrollable_frame.bind(
             "<Configure>",
@@ -1896,114 +2476,212 @@ TIPS
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Mouse wheel scrolling - use canvas-specific binding instead of bind_all
+        # Mouse wheel scrolling
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
-        # Bind mousewheel to canvas and scrollable_frame for better UX
         canvas.bind("<MouseWheel>", _on_mousewheel)
         scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
         
-        # Create centered content frame inside scrollable frame
-        content_frame = tk.Frame(scrollable_frame, bg='white')
-        content_frame.pack(fill='both', expand=True)
+        # Create centered content container
+        container = tk.Frame(scrollable_frame, bg='#f8f9fa')
+        container.pack(fill='both', expand=True, padx=30, pady=20)
         
-        # Add some top padding - reduced from 40 to 20
-        tk.Frame(content_frame, bg='white', height=20).pack()
+        # Main card with shadow effect
+        card = tk.Frame(container, bg='white', relief=tk.FLAT, bd=0)
+        card.pack(fill='both', expand=True)
         
-        # Logo/Title - reduced font size from 28 to 24
-        title_label = ttk.Label(content_frame, text="📏 ScreenRuler Pro",
-                               font=("Segoe UI", 24, "bold"),
-                               foreground="#5294e2", background='white')
-        title_label.pack(pady=5)
+        # Add subtle border
+        border_frame = tk.Frame(card, bg='#e1e4e8', height=1)
+        border_frame.pack(fill='x', side='top')
         
-        # Version - reduced font size from 14 to 12
-        version_label = ttk.Label(content_frame, text="Version 1.0.0",
-                                 font=("Segoe UI", 12),
-                                 foreground="#5c616c", background='white')
-        version_label.pack(pady=3)
+        # Content inside card
+        content_frame = tk.Frame(card, bg='white')
+        content_frame.pack(fill='both', expand=True, padx=40, pady=30)
         
-        # Separator - reduced padding from 20 to 10
-        ttk.Separator(content_frame, orient='horizontal').pack(fill='x', padx=80, pady=10)
+        # Logo/Title with icon
+        title_frame = tk.Frame(content_frame, bg='white')
+        title_frame.pack(pady=(0, 8))
         
-        # Author - reduced padding
-        author_label = ttk.Label(content_frame, text="Developed by",
-                                font=("Segoe UI", 10),
-                                foreground="#7f8c8d", background='white')
-        author_label.pack(pady=(5,3))
+        title_label = tk.Label(title_frame, text="📏 ScreenRuler Pro",
+                               font=("Segoe UI", 26, "bold"),
+                               fg="#5294e2", bg='white')
+        title_label.pack()
         
-        name_label = ttk.Label(content_frame, text="Dinuka Adasooriya",
-                              font=("Segoe UI", 16, "bold"),
-                              foreground="#5c616c", background='white')
-        name_label.pack(pady=3)
+        # Version badge
+        version_frame = tk.Frame(content_frame, bg='#e8f4f8', relief=tk.FLAT)
+        version_frame.pack(pady=8)
+        version_label = tk.Label(version_frame, text="Version 2.0.0",
+                                font=("Segoe UI", 11, "bold"),
+                                fg="#2c7a9e", bg='#e8f4f8')
+        version_label.pack(padx=16, pady=6)
         
-        # Affiliation
-        affiliation_label = ttk.Label(content_frame,
-                                     text="Department of Oral Biology\nYonsei University College of Dentistry",
-                                     font=("Segoe UI", 10),
-                                     foreground="#7a7f8b", background='white',
-                                     justify=tk.CENTER)
-        affiliation_label.pack(pady=5)
+        # Separator line
+        sep1 = tk.Frame(content_frame, bg='#e1e4e8', height=1)
+        sep1.pack(fill='x', pady=20)
         
-        # Email
-        email_frame = tk.Frame(content_frame, bg='white')
-        email_frame.pack(pady=3)
+        # Developer section with better layout
+        dev_section = tk.Frame(content_frame, bg='white')
+        dev_section.pack(pady=8)
         
-        ttk.Label(email_frame, text="✉️", font=("Arial", 12), background='white').pack(side='left', padx=5)
-        email_label = ttk.Label(email_frame, text="dinuka90@yuhs.ac",
-                               font=("Segoe UI", 11),
-                               foreground="#5294e2", background='white',
-                               cursor="hand2")
+        dev_label = tk.Label(dev_section, text="Developed by",
+                            font=("Segoe UI", 10),
+                            fg="#6c757d", bg='white')
+        dev_label.pack(pady=(0, 6))
+        
+        name_label = tk.Label(dev_section, text="Dinuka Adasooriya",
+                             font=("Segoe UI", 18, "bold"),
+                             fg="#2d3436", bg='white')
+        name_label.pack(pady=4)
+        
+        # Affiliation with icon
+        affil_frame = tk.Frame(dev_section, bg='white')
+        affil_frame.pack(pady=8)
+        
+        tk.Label(affil_frame, text="🏛️", font=("Arial", 13), bg='white').pack()
+        affiliation_label = tk.Label(affil_frame,
+                                    text="Department of Oral Biology\nYonsei University College of Dentistry",
+                                    font=("Segoe UI", 10),
+                                    fg="#6c757d", bg='white',
+                                    justify=tk.CENTER)
+        affiliation_label.pack(pady=4)
+        
+        # Email with better styling
+        email_container = tk.Frame(dev_section, bg='#f0f7ff', relief=tk.FLAT)
+        email_container.pack(pady=12)
+        
+        email_inner = tk.Frame(email_container, bg='#f0f7ff')
+        email_inner.pack(padx=20, pady=10)
+        
+        tk.Label(email_inner, text="📧", font=("Arial", 14), bg='#f0f7ff').pack(side='left', padx=6)
+        email_label = tk.Label(email_inner, text="dinuka90@yuhs.ac",
+                              font=("Segoe UI", 11, "underline"),
+                              fg="#5294e2", bg='#f0f7ff',
+                              cursor="hand2")
         email_label.pack(side='left')
         
-        # Separator - reduced padding from 20 to 10
-        ttk.Separator(content_frame, orient='horizontal').pack(fill='x', padx=80, pady=10)
-        
         # Description
-        desc_label = ttk.Label(content_frame,
-                              text="Professional on-screen measurement tool\nwith advanced calibration and features",
-                              font=("Segoe UI", 10),
-                              foreground="#7f8c8d", background='white',
-                              justify=tk.CENTER)
-        desc_label.pack(pady=5)
-
-        # License section - reduced padding from 15 to 10
-        ttk.Separator(content_frame, orient='horizontal').pack(fill='x', padx=80, pady=10)
-
-        lic_title = ttk.Label(content_frame, text="License", font=("Segoe UI", 12, "bold"), foreground="#5c616c", background='white')
-        lic_title.pack(pady=(3, 0))
-
-        lic_text = ttk.Label(
+        sep2 = tk.Frame(content_frame, bg='#e1e4e8', height=1)
+        sep2.pack(fill='x', pady=20)
+        
+        desc_label = tk.Label(content_frame,
+                             text="Professional on-screen measurement tool\nwith advanced calibration and features",
+                             font=("Segoe UI", 11),
+                             fg="#6c757d", bg='white',
+                             justify=tk.CENTER)
+        desc_label.pack(pady=12)
+        
+        # License section
+        sep3 = tk.Frame(content_frame, bg='#e1e4e8', height=1)
+        sep3.pack(fill='x', pady=20)
+        
+        lic_title = tk.Label(content_frame, text="📜 License", 
+                            font=("Segoe UI", 13, "bold"), 
+                            fg="#2d3436", bg='white')
+        lic_title.pack(pady=(4, 8))
+        
+        lic_text = tk.Label(
             content_frame,
-            text=(
-                "This program is licensed under the GNU General Public License v3.0 (GPL-3.0).\n"
-                "You are free to run, study, share, and modify the software, provided that\n"
-                "distributions of derivative works are also licensed under GPL-3.0."
-            ),
-            font=("Segoe UI", 9), foreground="#7f8c8d", background='white', justify=tk.CENTER
+            text="This program is licensed under the GNU General Public License v3.0 (GPL-3.0).\n"
+                 "You are free to run, study, share, and modify the software, provided that\n"
+                 "distributions of derivative works are also licensed under GPL-3.0.",
+            font=("Segoe UI", 9), fg="#6c757d", bg='white', justify=tk.CENTER
         )
-        lic_text.pack(pady=5)
-
-        tk.Button(
-            content_frame,
-            text="📄 View Full License",
+        lic_text.pack(pady=8)
+        
+        # License button with better styling
+        btn_frame = tk.Frame(content_frame, bg='white')
+        btn_frame.pack(pady=12)
+        
+        lic_btn = tk.Button(
+            btn_frame,
+            text="📄  View Full License",
             command=self.open_license_window,
             bg="#5294e2", fg="white",
             font=("Segoe UI", 10, "bold"),
-            padx=20, pady=6,
+            padx=28, pady=10,
             relief=tk.FLAT,
             cursor="hand2",
             activebackground="#4a85d4",
             activeforeground="white",
             borderwidth=0
-        ).pack(pady=(0, 8))
-
+        )
+        lic_btn.pack()
+        
+        # Hover effect
+        lic_btn.bind("<Enter>", lambda e: lic_btn.config(bg="#4a85d4"))
+        lic_btn.bind("<Leave>", lambda e: lic_btn.config(bg="#5294e2"))
+        
+        # GitHub Section
+        sep4 = tk.Frame(content_frame, bg='#e1e4e8', height=1)
+        sep4.pack(fill='x', pady=20)
+        
+        github_frame = tk.Frame(content_frame, bg='white')
+        github_frame.pack(pady=12)
+        
+        github_title = tk.Label(github_frame, text="Open Source",
+                               font=("Segoe UI", 11, "bold"),
+                               fg="#2d3436", bg='white')
+        github_title.pack(pady=(0, 8))
+        
+        # GitHub button with logo
+        github_btn_container = tk.Frame(github_frame, bg='#f6f8fa', relief=tk.FLAT)
+        github_btn_container.pack(pady=8)
+        
+        github_inner = tk.Frame(github_btn_container, bg='#f6f8fa')
+        github_inner.pack(padx=20, pady=12)
+        
+        # Try to load GitHub icon
+        github_icon_label = None
+        icon_loaded = False
+        try:
+            icon_path = os.path.join(os.path.dirname(__file__), 'GitHub_Black.ico')
+            if os.path.exists(icon_path):
+                icon_image = Image.open(icon_path)
+                icon_image = icon_image.resize((20, 20), Image.Resampling.LANCZOS)
+                icon_photo = ImageTk.PhotoImage(icon_image)
+                github_icon_label = tk.Label(github_inner, image=icon_photo, bg='#f6f8fa')
+                github_icon_label.image = icon_photo  # Keep reference
+                github_icon_label.pack(side='left', padx=(0, 8))
+                icon_loaded = True
+        except Exception:
+            pass
+        
+        # Fallback to text icon if icon couldn't be loaded
+        if not icon_loaded:
+            tk.Label(github_inner, text="🐙", font=("Arial", 16), bg='#f6f8fa').pack(side='left', padx=(0, 8))
+        
+        github_link = tk.Label(github_inner, text="View on GitHub",
+                              font=("Segoe UI", 11, "underline"),
+                              fg="#0366d6", bg='#f6f8fa',
+                              cursor="hand2")
+        github_link.pack(side='left')
+        
+        def open_github(event=None):
+            import webbrowser
+            webbrowser.open("https://github.com/Dinuka0001/ScreenRuler-Pro")
+        
+        github_link.bind("<Button-1>", open_github)
+        if github_icon_label:
+            github_icon_label.bind("<Button-1>", open_github)
+        
+        # Hover effects
+        def on_enter(e):
+            github_link.config(fg="#0256c7")
+        
+        def on_leave(e):
+            github_link.config(fg="#0366d6")
+        
+        github_link.bind("<Enter>", on_enter)
+        github_link.bind("<Leave>", on_leave)
+        
         # Copyright
-        copyright_label = ttk.Label(content_frame,
-                                   text="© 2025 All Rights Reserved",
-                                   font=("Segoe UI", 9),
-                                   foreground="#95a5a6", background='white')
-        copyright_label.pack(pady=(5, 20))
+        tk.Frame(content_frame, bg='white', height=10).pack()
+        copyright_label = tk.Label(content_frame,
+                                  text="© 2025 All Rights Reserved",
+                                  font=("Segoe UI", 9),
+                                  fg="#adb5bd", bg='white')
+        copyright_label.pack(pady=(8, 0))
 
     def open_license_window(self):
         """Open a window to display the GPL-3.0 license text.
@@ -2061,14 +2739,6 @@ TIPS
 
         text_widget.config(state='disabled')
 
-    def set_theme(self, theme_name):
-        """Apply theme"""
-        if theme_name in self.themes:
-            self.config["theme"] = theme_name
-            self.config["color_active"] = self.themes[theme_name]["active"]
-            self.config["color_pass"] = self.themes[theme_name]["pass"]
-            self.draw()
-
     def cycle_theme(self, event=None):
         """Cycle through themes"""
         themes = list(self.themes.keys())
@@ -2086,7 +2756,7 @@ TIPS
         next_idx = (current_idx + 1) % len(units)
         self.config["unit"] = units[next_idx]
         self.save_config()
-        if hasattr(self, 'unit_var'):
+        if self.unit_var:
             self.unit_var.set(self.config["unit"])
         self.draw()
         self.show_notification(f"Unit: {unit_names[next_idx]}")
@@ -2101,6 +2771,18 @@ TIPS
         self.update_lock_button()
         lock_text = "None" if locks[next_idx] is None else ("Horizontal" if locks[next_idx] == 0 else "Vertical")
         self.show_notification(f"Lock: {lock_text}")
+    
+    def cycle_endpoint_style(self, event=None):
+        """Cycle through endpoint styles"""
+        styles = ["none", "circle", "flat", "crosslines", "arrow"]
+        style_names = ["None", "Circle", "Square", "Crosslines", "Arrow"]
+        current_style = self.config.get("endpoint_style", "circle")
+        current_idx = styles.index(current_style) if current_style in styles else 1
+        next_idx = (current_idx + 1) % len(styles)
+        self.config["endpoint_style"] = styles[next_idx]
+        self.save_config()
+        self.draw()
+        self.show_notification(f"Endpoint: {style_names[next_idx]}")
 
     def toggle_guides(self, event=None):
         """Toggle guide lines"""
@@ -2246,9 +2928,33 @@ TIPS
         
         self.update_mode_display()
         self.draw()
-
+    def minimize_toolbar_only(self):
+        """Minimize only the toolbar to taskbar, keeping ruler visible"""
+        if self.toolbar and self.toolbar.winfo_exists():
+            if self.toolbar_minimized:
+                # Restore toolbar from taskbar
+                self.toolbar.deiconify()
+                self.toolbar.lift()
+                self.toolbar.attributes('-topmost', True)
+                self.toolbar_minimized = False
+                self.show_notification("Toolbar restored")
+            else:
+                # Minimize toolbar to taskbar
+                self.toolbar.iconify()
+                self.toolbar_minimized = True
+                self.show_notification("Toolbar minimized (click taskbar to restore)")
+    
+    def minimize_to_tray(self):
+        """Minimize entire app to system tray"""
+        self.root.withdraw()
+        if self.toolbar and self.toolbar.winfo_exists():
+            self.toolbar.withdraw()
+        self.minimized = True
+        self.toolbar_minimized = False  # Reset toolbar state when minimizing to tray
+        self.show_notification("Minimized to tray")
+    
     def toggle_minimize(self, event=None):
-        """Minimize to tray or restore window"""
+        """Minimize to tray or restore window (keyboard shortcut)"""
         if self.minimized:
             self.root.deiconify()
             self.root.lift()
@@ -2256,12 +2962,9 @@ TIPS
                 self.toolbar.deiconify()
                 self.toolbar.lift()
             self.minimized = False
+            self.toolbar_minimized = False  # Reset toolbar state when restoring
         else:
-            self.root.withdraw()
-            if self.toolbar and self.toolbar.winfo_exists():
-                self.toolbar.withdraw()
-            self.minimized = True
-            self.show_notification("Minimized to tray")
+            self.minimize_to_tray()
 
     def get_distance(self):
         """Calculate distance in pixels"""
@@ -2401,13 +3104,20 @@ TIPS
             # Choose color based on mode
             current_color = self.config["color_pass"] if self.is_passthrough else self.config["color_active"]
 
-            # Draw based on selected mode
-            if self.config["mode"] == "angle":
-                self.draw_angle_mode(current_color)
-            elif self.config["mode"] == "polygon":
-                self.draw_polygon_mode(current_color)
-            else:
-                self.draw_ruler_mode(current_color)
+            # Draw based on selected mode and visibility
+            current_mode = self.config["mode"]
+            is_visible = self.mode_visible.get(current_mode, True)
+            
+            if is_visible:
+                if current_mode == "angle":
+                    self.draw_angle_mode(current_color)
+                elif current_mode == "polygon":
+                    self.draw_polygon_mode(current_color)
+                else:
+                    self.draw_ruler_mode(current_color)
+            
+            # Draw text objects (always visible when text mode is active or objects exist)
+            self.draw_text_objects(current_color)
             
             # Update measurement display in toolbar
             self.update_measurement_display()
@@ -2461,6 +3171,80 @@ TIPS
             except Exception:
                 pass
     
+    def draw_endpoint(self, x, y, current_color, size=10, angle=None):
+        """Draw endpoint based on the selected style
+        
+        Args:
+            x, y: endpoint coordinates
+            current_color: color for the endpoint
+            size: base size for the endpoint (default 10)
+            angle: optional angle for arrow direction (in degrees)
+        """
+        style = self.config.get("endpoint_style", "circle")
+        
+        if style == "none":
+            # Don't draw anything
+            return
+        elif style == "circle":
+            # Current default - circle with outline
+            r = size
+            self.canvas.create_oval(x-r, y-r, x+r, y+r, 
+                                   outline=current_color, width=3, 
+                                   fill=self.config["bg_color"])
+        elif style == "flat":
+            # Square endpoint
+            r = size
+            self.canvas.create_rectangle(x-r, y-r, x+r, y+r, 
+                                         outline=current_color, width=3, 
+                                         fill=self.config["bg_color"])
+        elif style == "crosslines":
+            # Crosshair style
+            length = size * 1.5
+            self.canvas.create_line(x-length, y, x+length, y, 
+                                   fill=current_color, width=2)
+            self.canvas.create_line(x, y-length, x, y+length, 
+                                   fill=current_color, width=2)
+            # Small circle in the center
+            r = size * 0.4
+            self.canvas.create_oval(x-r, y-r, x+r, y+r, 
+                                   outline=current_color, width=2, 
+                                   fill=self.config["bg_color"])
+        elif style == "arrow":
+            # Arrow head pointing away from the line
+            if angle is not None:
+                # Convert angle to radians
+                angle_rad = math.radians(angle)
+                # Arrow dimensions
+                arrow_length = size * 1.5
+                arrow_width = size * 0.8
+                
+                # Calculate arrow points
+                # Tip of arrow at endpoint
+                tip_x, tip_y = x, y
+                # Base of arrow
+                base_x = x - arrow_length * math.cos(angle_rad)
+                base_y = y - arrow_length * math.sin(angle_rad)
+                # Perpendicular for arrow wings
+                perp_x = arrow_width * math.sin(angle_rad)
+                perp_y = -arrow_width * math.cos(angle_rad)
+                
+                # Draw filled triangle
+                points = [
+                    tip_x, tip_y,
+                    base_x + perp_x, base_y + perp_y,
+                    base_x - perp_x, base_y - perp_y
+                ]
+                self.canvas.create_polygon(points, 
+                                          fill=current_color, 
+                                          outline=current_color, 
+                                          width=2)
+            else:
+                # Fallback to circle if no angle provided
+                r = size
+                self.canvas.create_oval(x-r, y-r, x+r, y+r, 
+                                       outline=current_color, width=3, 
+                                       fill=self.config["bg_color"])
+    
     def draw_ruler_mode(self, current_color):
         """Draw ruler in normal or fraction mode"""
         x1, y1 = self.p1["x"], self.p1["y"]
@@ -2479,9 +3263,11 @@ TIPS
         self.draw_ticks(x1, y1, x2, y2, dist, current_color)
 
         # 4. Endpoints (Handles)
-        r = 10
-        self.canvas.create_oval(x1-r, y1-r, x1+r, y1+r, outline=current_color, width=3, fill=self.config["bg_color"])
-        self.canvas.create_oval(x2-r, y2-r, x2+r, y2+r, outline=current_color, width=3, fill=self.config["bg_color"])
+        # Calculate angle for arrow direction
+        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+        # Draw endpoints with arrows pointing outward
+        self.draw_endpoint(x1, y1, current_color, size=10, angle=angle + 180)
+        self.draw_endpoint(x2, y2, current_color, size=10, angle=angle)
 
         # Measurement text is now shown in the toolbar instead of on canvas
 
@@ -2502,11 +3288,12 @@ TIPS
                 x2, y2 = pts[(i + 1) % n]["x"], pts[(i + 1) % n]["y"]
                 self.canvas.create_line(x1, y1, x2, y2, fill=current_color, width=self.config["ruler_thickness"], capstyle=tk.ROUND)
 
-            # Vertices (handles)
-            r = 8
-            for p in pts:
-                self.canvas.create_oval(p["x"] - r, p["y"] - r, p["x"] + r, p["y"] + r,
-                                       outline=current_color, width=3, fill=self.config["bg_color"])
+            # Vertices (handles) - draw endpoints at each vertex
+            for i, p in enumerate(pts):
+                # Calculate angle from this point to the next
+                next_p = pts[(i + 1) % n]
+                angle = math.degrees(math.atan2(next_p["y"] - p["y"], next_p["x"] - p["x"]))
+                self.draw_endpoint(p["x"], p["y"], current_color, size=8, angle=angle)
         except Exception as e:
             print(f"Warning: Error drawing polygon: {e}")
     
@@ -2536,15 +3323,13 @@ TIPS
         self.canvas.create_oval(cx-r_center, cy-r_center, cx+r_center, cy+r_center, 
                                outline=current_color, width=4, fill=self.config["bg_color"])
         
-        # Draw arm endpoints
-        r = 10
-        self.canvas.create_oval(ax1-r, ay1-r, ax1+r, ay1+r, outline=current_color, width=3, fill=self.config["bg_color"])
-        self.canvas.create_oval(ax2-r, ay2-r, ax2+r, ay2+r, outline=current_color, width=3, fill=self.config["bg_color"])
-        
-        # Draw arc to visualize angle
+        # Draw arm endpoints with angle information for arrows
         angle1 = math.degrees(math.atan2(ay1 - cy, ax1 - cx))
         angle2 = math.degrees(math.atan2(ay2 - cy, ax2 - cx))
+        self.draw_endpoint(ax1, ay1, current_color, size=10, angle=angle1)
+        self.draw_endpoint(ax2, ay2, current_color, size=10, angle=angle2)
         
+        # Draw arc to visualize angle
         # Normalize angles to 0-360
         if angle1 < 0: angle1 += 360
         if angle2 < 0: angle2 += 360
@@ -2567,28 +3352,116 @@ TIPS
                               start=angle1, extent=arc_extent, outline=current_color, width=2, style=tk.ARC)
         
         # Measurement text is now shown in the toolbar instead of on canvas
+    
+    def draw_text_objects(self, current_color):
+        """Draw all text objects on canvas"""
+        if not self.text_objects or not self.text_visible:
+            return
+        
+        try:
+            for i, text_obj in enumerate(self.text_objects):
+                x = text_obj["x"]
+                y = text_obj["y"]
+                width = text_obj["width"]
+                height = text_obj["height"]
+                text = text_obj["text"]
+                
+                # Get text formatting
+                font_family = text_obj.get("font_family", "Arial")
+                font_size = text_obj.get("font_size", 24)
+                bold = text_obj.get("bold", False)
+                italic = text_obj.get("italic", False)
+                underline = text_obj.get("underline", False)
+                outline = text_obj.get("outline", False)
+                
+                # Build font tuple
+                font_weight = "bold" if bold else "normal"
+                font_slant = "italic" if italic else "roman"
+                font_tuple = (font_family, font_size, f"{font_weight} {font_slant}")
+                
+                # Draw outline box if enabled
+                if outline:
+                    self.canvas.create_rectangle(
+                        x, y, x + width, y + height,
+                        outline=current_color,
+                        width=2
+                    )
+                
+                # Draw selection highlight if this text is selected
+                if hasattr(self, 'selected_text_index') and self.selected_text_index == i:
+                    # Draw a thick highlight border around selected text
+                    self.canvas.create_rectangle(
+                        x - 3, y - 3, x + width + 3, y + height + 3,
+                        outline='#FFD700',  # Gold color for selection
+                        width=3,
+                        dash=(5, 3)  # Dashed line
+                    )
+                
+                # Draw text centered in the box
+                text_x = x + width / 2
+                text_y = y + height / 2
+                
+                text_id = self.canvas.create_text(
+                    text_x, text_y,
+                    text=text,
+                    fill=current_color,
+                    font=font_tuple,
+                    anchor='center'
+                )
+                
+                # Apply underline if needed (tkinter canvas text doesn't support underline directly)
+                if underline:
+                    # Get text bounding box
+                    bbox = self.canvas.bbox(text_id)
+                    if bbox:
+                        x1, y1, x2, y2 = bbox
+                        # Draw line under text
+                        self.canvas.create_line(
+                            x1, y2 + 2, x2, y2 + 2,
+                            fill=current_color, width=2
+                        )
+        except Exception as e:
+            print(f"Warning: Error drawing text objects: {e}")
 
+    def init_polygon_at_position(self, cx, cy):
+        """Initialize a polygon at the specified center position."""
+        try:
+            w, h = 320, 200
+            sides = self.config.get("polygon_sides", 4)
+            
+            if sides == 4:
+                # Rectangle
+                self.polygon_points = [
+                    {"x": cx - w / 2, "y": cy - h / 2},
+                    {"x": cx + w / 2, "y": cy - h / 2},
+                    {"x": cx + w / 2, "y": cy + h / 2},
+                    {"x": cx - w / 2, "y": cy + h / 2},
+                ]
+            else:
+                # Regular polygon
+                radius = 150
+                self.polygon_points = []
+                for i in range(sides):
+                    angle = 2 * math.pi * i / sides - math.pi / 2
+                    self.polygon_points.append({
+                        "x": cx + radius * math.cos(angle),
+                        "y": cy + radius * math.sin(angle)
+                    })
+        except Exception as e:
+            print(f"Warning: Could not initialize polygon: {e}")
+            # Absolute fallback
+            self.polygon_points = [
+                {"x": cx - 160, "y": cy - 100},
+                {"x": cx + 160, "y": cy - 100},
+                {"x": cx + 160, "y": cy + 100},
+                {"x": cx - 160, "y": cy + 100},
+            ]
+    
     def init_polygon_default(self):
         """Initialize a default 4-point polygon centered on screen."""
-        try:
-            cx = self.virtual_x + (self.virtual_w / 2)
-            cy = self.virtual_y + (self.virtual_h / 2)
-            w, h = 320, 200
-            self.polygon_points = [
-                {"x": cx - w / 2, "y": cy - h / 2},
-                {"x": cx + w / 2, "y": cy - h / 2},
-                {"x": cx + w / 2, "y": cy + h / 2},
-                {"x": cx - w / 2, "y": cy + h / 2},
-            ]
-        except Exception as e:
-            print(f"Warning: Could not initialize default polygon: {e}")
-            # Absolute fallback with hardcoded values
-            self.polygon_points = [
-                {"x": 400, "y": 300},
-                {"x": 720, "y": 300},
-                {"x": 720, "y": 500},
-                {"x": 400, "y": 500},
-            ]
+        cx = self.virtual_x + (self.virtual_w / 2)
+        cy = self.virtual_y + (self.virtual_h / 2)
+        self.init_polygon_at_position(cx, cy)
     
     def get_color_with_alpha(self, hex_color):
         """Convert hex color to RGB tuple for PIL"""
@@ -2623,10 +3496,14 @@ TIPS
         # Fractions mode keeps equal partitions as before
         if self.config["show_fractions"]:
             fraction_count = max(2, self.config["fraction_count"])
+            # Only iterate up to fraction_count (inclusive) to avoid drawing beyond ruler end
             for i in range(fraction_count + 1):
                 t = i / fraction_count
-                px = x1 + (x2 - x1) * t
-                py = y1 + (y2 - y1) * t
+                tick_dist = t * dist
+                
+                # Draw tick at this fraction position
+                px = x1 + ux * tick_dist
+                py = y1 + uy * tick_dist
                 length = 16 if i in (0, fraction_count) else 12
                 self.canvas.create_line(px + nx*length, py + ny*length,
                                         px - nx*length, py - ny*length,
@@ -2657,6 +3534,9 @@ TIPS
             return 1.0  # px not adjusted by calibration for spacing
 
         # Determine minor step size in pixels and hierarchy
+        # Initialize medium2_mult to avoid unbound variable error (only used for inches)
+        medium2_mult = 0
+        
         if unit == "px":
             minor_px = max(5, int(self.config.get("tick_spacing", 20)))
             # Hierarchy: minor, medium every x5, major every x10
@@ -2730,8 +3610,13 @@ TIPS
         # Draw ticks along the segment
         steps = int(dist // minor_px) + 1
         for i in range(steps + 1):
-            px = x1 + ux * (i * minor_px)
-            py = y1 + uy * (i * minor_px)
+            tick_dist = i * minor_px
+            # Only draw tick if it's within the ruler length
+            if tick_dist > dist:
+                break
+                
+            px = x1 + ux * tick_dist
+            py = y1 + uy * tick_dist
 
             # Determine tick length by hierarchy
             length = 10
@@ -2771,6 +3656,34 @@ TIPS
         """Handle mouse click"""
         if self.is_passthrough:
             return
+        
+        # Check if clicking on text objects first (priority over other modes)
+        text_clicked = False
+        if self.text_objects and self.text_visible:
+            for i, text_obj in enumerate(self.text_objects):
+                x, y = text_obj["x"], text_obj["y"]
+                width, height = text_obj["width"], text_obj["height"]
+                
+                # Check if clicking inside text box
+                if x <= event.x <= x + width and y <= event.y <= y + height:
+                    # Toggle selection if clicking on already selected text
+                    if self.selected_text_index == i:
+                        self.selected_text_index = None  # Deselect
+                        self.draw()
+                        return
+                    else:
+                        # Select this text for moving
+                        self.text_dragging_index = i
+                        self.selected_text_index = i  # Mark as selected
+                        self.text_drag_start = {"x": event.x, "y": event.y}
+                        text_clicked = True
+                        self.draw()  # Redraw to show selection
+                        return
+        
+        # Clear text selection if clicking elsewhere
+        if not text_clicked and self.selected_text_index is not None:
+            self.selected_text_index = None
+            self.draw()  # Redraw to clear selection highlight
         
         if self.config["mode"] == "angle":
             # Angle mode interaction
@@ -2859,6 +3772,16 @@ TIPS
         if self.is_passthrough:
             return
         
+        # Handle text object dragging
+        if self.text_dragging_index is not None:
+            dx = event.x - self.text_drag_start["x"]
+            dy = event.y - self.text_drag_start["y"]
+            self.text_objects[self.text_dragging_index]["x"] += dx
+            self.text_objects[self.text_dragging_index]["y"] += dy
+            self.text_drag_start = {"x": event.x, "y": event.y}
+            self.draw()
+            return
+        
         if not self.dragging and self.polygon_dragging_index is None and self.polygon_move_origin is None:
             return
         
@@ -2929,6 +3852,9 @@ TIPS
         self.dragging = None
         self.polygon_dragging_index = None
         self.polygon_move_origin = None
+        self.text_dragging_index = None
+        self.text_resizing_index = None
+        self.text_resize_handle = None
 
     def on_mouse_move(self, event):
         """Handle mouse movement for cursor changes"""
@@ -2936,6 +3862,17 @@ TIPS
             return
         
         try:
+            # Check if hovering over text objects first
+            if self.text_objects and self.text_visible:
+                for text_obj in self.text_objects:
+                    x, y = text_obj["x"], text_obj["y"]
+                    width, height = text_obj["width"], text_obj["height"]
+                    
+                    # Check if mouse is inside text box
+                    if x <= event.x <= x + width and y <= event.y <= y + height:
+                        self.canvas.config(cursor="fleur")
+                        return
+            
             if self.config["mode"] == "angle":
                 # Angle mode cursor changes
                 cx, cy = self.angle_center["x"], self.angle_center["y"]
@@ -3032,6 +3969,19 @@ TIPS
         
         menu.add_separator()
         
+        # Text mode options
+        if self.text_mode_active or self.text_objects:
+            text_menu = self._make_menu(menu)
+            text_status = "✓" if self.text_mode_active else " "
+            text_menu.add_command(label=f"{text_status} Text Mode", command=self.toggle_text_mode)
+            if self.text_objects:
+                text_menu.add_separator()
+                delete_label = "Delete Selected Text (Del)" if self.selected_text_index is not None else "Delete Last Text (Del)"
+                text_menu.add_command(label=delete_label, command=self.delete_text_object)
+                text_menu.add_command(label="Clear All Text", command=self.clear_all_text_objects)
+            menu.add_cascade(label="✏️ Text", menu=text_menu)
+            menu.add_separator()
+        
         # Toggle labels (V key)
         labels_status = "✓ Show" if self.config["show_labels"] else "✗ Hide"
         menu.add_command(label=f"📖 Ruler Values {labels_status} (V)", command=self.toggle_labels)
@@ -3042,6 +3992,7 @@ TIPS
         menu.add_command(label="ℹ️ About (A)", command=self.show_about)
         menu.add_separator()
         menu.add_command(label="🔄 Reset Position (R)", command=self.reset_ruler)
+        menu.add_command(label="🔻 Minimize to Tray", command=self.minimize_to_tray)
         menu.add_command(label="❌ Exit (Esc)", command=self.close_app)
         
         menu.post(event.x_root, event.y_root)
@@ -3122,59 +4073,25 @@ TIPS
     
     def set_mode_from_menu(self, mode):
         """Set measurement mode from menu"""
-        self.config["mode"] = mode
+        # Ensure the mode is visible when selected from menu
+        self.mode_visible[mode] = True
+        self.set_mode_from_toolbar(mode)
         
-        # When switching to fractions mode, enable fractions
-        if self.config["mode"] == "fractions":
-            self.config["show_fractions"] = True
-        else:
-            self.config["show_fractions"] = False
-        
-        # Initialize angle mode position only if angle center is not set
-        if self.config["mode"] == "angle":
-            if not hasattr(self, 'angle_center') or self.angle_center is None:
-                cx = self.virtual_x + (self.virtual_w / 2)
-                cy = self.virtual_y + (self.virtual_h / 2)
-                self.angle_center = {"x": cx, "y": cy}
-                self.angle_arm1 = {"x": cx - 200, "y": cy}
-                self.angle_arm2 = {"x": cx, "y": cy - 200}
-        elif self.config["mode"] == "polygon":
-            if not self.polygon_points:
-                self.init_polygon_default()
-        
-        self.save_config()
-        self.draw()
-        mode_name = {"ruler": "Ruler", "fractions": "Fractions", "angle": "Angle", "polygon": "Polygon"}[self.config["mode"]]
+        mode_name = {"ruler": "Ruler", "fractions": "Fractions", "angle": "Angle", "polygon": "Polygon"}[mode]
         self.show_notification(f"Mode: {mode_name}")
     
     def cycle_mode(self, event=None):
-        """Cycle through measurement modes: ruler, fractions, angle"""
+        """Cycle through measurement modes: ruler, fractions, angle, polygon"""
         modes = ["ruler", "fractions", "angle", "polygon"]
         current_idx = modes.index(self.config["mode"]) if self.config["mode"] in modes else 0
         next_idx = (current_idx + 1) % len(modes)
-        self.config["mode"] = modes[next_idx]
+        next_mode = modes[next_idx]
         
-        # When switching to fractions mode, enable fractions
-        if self.config["mode"] == "fractions":
-            self.config["show_fractions"] = True
-        else:
-            self.config["show_fractions"] = False
+        # Ensure the new mode is visible when cycling
+        self.mode_visible[next_mode] = True
+        self.set_mode_from_toolbar(next_mode)
         
-        # Initialize angle mode position only if angle center is not set
-        if self.config["mode"] == "angle":
-            if not hasattr(self, 'angle_center') or self.angle_center is None:
-                cx = self.virtual_x + (self.virtual_w / 2)
-                cy = self.virtual_y + (self.virtual_h / 2)
-                self.angle_center = {"x": cx, "y": cy}
-                self.angle_arm1 = {"x": cx - 200, "y": cy}
-                self.angle_arm2 = {"x": cx, "y": cy - 200}
-        elif self.config["mode"] == "polygon":
-            if not self.polygon_points:
-                self.init_polygon_default()
-        
-        self.save_config()
-        self.draw()
-        mode_name = {"ruler": "Ruler", "fractions": "Fractions", "angle": "Angle", "polygon": "Polygon"}[self.config["mode"]]
+        mode_name = {"ruler": "Ruler", "fractions": "Fractions", "angle": "Angle", "polygon": "Polygon"}[next_mode]
         self.show_notification(f"Mode: {mode_name}")
 
     def close_app(self, event=None):

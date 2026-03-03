@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# PyInstaller
+*.spec.backup
+*.manifest
+*.manifest.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Application specific
+ruler_config.json
+*.log
+
+# Build artifacts
+build/
+dist/
+*.pkg
+
+# Temporary files
+*.tmp
+*.bak
+*.backup

@@ -6,7 +6,7 @@ a = Analysis(
     ['ScreenRuler_pro.py'],
     pathex=[],
     binaries=[],
-    datas=[('Icon.ico', '.'), ('LICENSE', '.')],  # Include Icon.ico and LICENSE in the bundle
+    datas=[('Icon.ico', '.'), ('LICENSE', '.'), ('GitHub_Black.ico', '.')],  # Include Icon.ico, LICENSE, and GitHub icon in the bundle
     hiddenimports=['PIL', 'PIL._tkinter_finder', 'pystray', 'pystray._win32'],
     hookspath=[],
     hooksconfig={},
@@ -27,7 +27,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='ScreenRuler_Pro_v1.0.0',
+    name='ScreenRuler_Pro_v2.0.0',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

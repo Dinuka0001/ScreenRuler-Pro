@@ -3,8 +3,8 @@
 ## Method 1: Standalone Executable (Recommended for End Users)
 
 ### Download and Run
-1. Go to the [Releases](https://github.com/yourusername/ScreenRuler-Pro/releases) page
-2. Download `ScreenRuler_Pro_v1.0.0.exe` from the latest release
+1. Go to the [Releases](https://github.com/Dinuka0001/ScreenRuler-Pro/releases) page
+2. Download `ScreenRuler_Pro_v2.0.0.exe` from the latest release
 3. Double-click to run - no installation needed!
 4. The application is completely portable
 
@@ -27,7 +27,7 @@
 #### 1. Get the Source Code
 **Option A: Clone with Git**
 ```bash
-git clone https://github.com/yourusername/ScreenRuler-Pro.git
+git clone https://github.com/Dinuka0001/ScreenRuler-Pro.git
 cd ScreenRuler-Pro
 ```
 
